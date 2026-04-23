@@ -1,4 +1,5 @@
 import { getDashboardSnapshot } from "./dashboard";
+import { isExecutionCommand, runExecutionCommand } from "./execution";
 import { isModelsCommand, runModelsCommand } from "./models";
 import { isPlannerCommand, runPlannerCommand } from "./planner";
 
@@ -6,6 +7,7 @@ const args = process.argv.slice(2);
 const isSmokeMode = args.includes("--smoke") || process.env.CI === "true" || !process.stdout.isTTY;
 const isModelsMode = args.some(isModelsCommand);
 const isPlannerMode = args.some(isPlannerCommand);
+const isExecutionMode = args.some(isExecutionCommand);
 
 if (isModelsMode) {
   try {
@@ -20,6 +22,16 @@ if (isModelsMode) {
 if (isPlannerMode) {
   try {
     console.log(await runPlannerCommand(args));
+    process.exit(0);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+if (isExecutionMode) {
+  try {
+    console.log(await runExecutionCommand(args));
     process.exit(0);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

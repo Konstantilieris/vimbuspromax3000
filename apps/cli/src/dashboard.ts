@@ -1,4 +1,5 @@
 import { PRODUCT_NAME } from "@vimbuspromax3000/shared";
+import { EXECUTION_COMMANDS } from "./execution";
 import { MODEL_COMMANDS } from "./models";
 import { PLANNER_COMMANDS } from "./planner";
 
@@ -14,6 +15,7 @@ export function getDashboardLines(): string[] {
     DASHBOARD_COLUMNS.join(" | "),
     `Models: ${MODEL_COMMANDS.join(" ")}`,
     `Planner: ${PLANNER_COMMANDS.join(" ")}`,
+    `Execution: ${EXECUTION_COMMANDS.join(" ")}`,
     "No project loaded yet.",
     "Health: bootstrap placeholder",
   ];
