@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "lib": [
+      "ESNext"
+    ],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleDetection": "force",
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "ignoreDeprecations": "6.0",
+    "paths": {
+      "@vimbuspromax3000/agent": ["packages/agent/src/index.ts"],
+      "@vimbuspromax3000/db": ["packages/db/src/index.ts"],
+      "@vimbuspromax3000/db/*": ["packages/db/src/*"],
+      "@vimbuspromax3000/model-registry": ["packages/model-registry/src/index.ts"],
+      "@vimbuspromax3000/planner": ["packages/planner/src/index.ts"],
+      "@vimbuspromax3000/policy-engine": ["packages/policy-engine/src/index.ts"],
+      "@vimbuspromax3000/shared": ["packages/shared/src/index.ts"],
+      "@vimbuspromax3000/test-runner": ["packages/test-runner/src/index.ts"]
+    },
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "types": [
+      "bun"
+    ]
+  }
+}

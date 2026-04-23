@@ -1,0 +1,16 @@
+node_modules/
+.bun/
+dist/
+coverage/
+.artifacts/
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+packages/db/src/generated/
+packages/db/prisma/*.db

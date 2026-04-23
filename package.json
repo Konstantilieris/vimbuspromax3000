@@ -1,0 +1,26 @@
+{
+  "name": "vimbuspromax3000",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.13",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "api": "bun --filter @vimbuspromax3000/api dev",
+    "cli": "bun --filter @vimbuspromax3000/cli start",
+    "db:generate": "bun --filter @vimbuspromax3000/db db:generate",
+    "db:migrate": "bun --filter @vimbuspromax3000/db db:migrate",
+    "db:migrate:init": "bun --filter @vimbuspromax3000/db db:migrate:init",
+    "test:vitest": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.13",
+    "prisma": "7.8.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.5"
+  }
+}

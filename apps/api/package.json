@@ -1,0 +1,20 @@
+{
+  "name": "@vimbuspromax3000/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --hot src/index.ts",
+    "start": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "@vimbuspromax3000/agent": "workspace:*",
+    "@vimbuspromax3000/db": "workspace:*",
+    "@vimbuspromax3000/model-registry": "workspace:*",
+    "@vimbuspromax3000/planner": "workspace:*",
+    "@vimbuspromax3000/policy-engine": "workspace:*",
+    "@vimbuspromax3000/shared": "workspace:*",
+    "@vimbuspromax3000/test-runner": "workspace:*",
+    "hono": "4.12.14"
+  }
+}

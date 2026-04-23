@@ -1,0 +1,794 @@
+import app, { createApp, healthResponse } from "./app";
+import {
+  createIsolatedPrisma,
+  initializeGitRepository,
+  removeTempDir,
+  runCommand,
+  writeProjectFile,
+} from "@vimbuspromax3000/db/testing";
+import type { PrismaClient } from "@vimbuspromax3000/db/client";
+import { createPlannerService } from "@vimbuspromax3000/planner";
+
+describe("GET /health", () => {
+  test("returns the stable health payload", async () => {
+    const response = await app.fetch(new Request("http://localhost/health"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(healthResponse);
+  });
+});
+
+describe("model registry API", () => {
+  let prisma: PrismaClient;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    const isolated = await createIsolatedPrisma("vimbus-api-");
+    prisma = isolated.prisma;
+    tempDir = isolated.tempDir;
+  });
+
+  afterEach(async () => {
+    await prisma.$disconnect();
+    removeTempDir(tempDir);
+  });
+
+  test("creates provider, model, assignment, and resolves the slot", async () => {
+    const api = createApp({
+      prisma,
+      env: {
+        VIMBUS_TEST_KEY: "present",
+      },
+    });
+    const project = await prisma.project.create({
+      data: {
+        name: "Test Project",
+        rootPath: tempDir,
+        baseBranch: "main",
+      },
+    });
+
+    const secretRef = await postJson(api, "/model-secret-refs", {
+      projectId: project.id,
+      label: "test api key",
+      reference: "VIMBUS_TEST_KEY",
+    });
+    expect(secretRef.status).toBe(201);
+    const secret = await secretRef.json();
+
+    const providerRef = await postJson(api, "/model-providers", {
+      projectId: project.id,
+      key: "openai",
+      label: "OpenAI",
+      providerKind: "openai",
+      authType: "api_key",
+      secretRefId: secret.id,
+      status: "active",
+    });
+    expect(providerRef.status).toBe(201);
+    const provider = await providerRef.json();
+
+    const modelRef = await postJson(api, "/models", {
+      providerId: provider.id,
+      name: "GPT Test",
+      slug: "gpt-test",
+      supportsTools: true,
+      supportsJson: true,
+      costTier: "medium",
+      speedTier: "balanced",
+      reasoningTier: "standard",
+    });
+    expect(modelRef.status).toBe(201);
+    const model = await modelRef.json();
+
+    const assignRef = await postJson(api, "/model-slots/executor_default/assign", {
+      projectId: project.id,
+      registeredModelId: model.id,
+    });
+    expect(assignRef.status).toBe(200);
+
+    const previewRef = await postJson(api, "/model-policy/preview", {
+      projectId: project.id,
+      slotKey: "executor_default",
+      requiredCapabilities: ["tools", "json"],
+    });
+    expect(previewRef.status).toBe(200);
+    const preview = await previewRef.json();
+
+    expect(preview.ok).toBe(true);
+    expect(preview.value.concreteModelName).toBe("openai:gpt-test");
+
+    const events = await prisma.loopEvent.findMany({
+      where: { projectId: project.id },
+      orderBy: [{ createdAt: "asc" }],
+    });
+    expect(events.map((event) => event.type)).toEqual([
+      "model.resolution.requested",
+      "model.resolution.succeeded",
+    ]);
+  });
+
+  test("bootstraps a runnable model setup idempotently", async () => {
+    const api = createApp({
+      prisma,
+      env: {
+        VIMBUS_TEST_KEY: "present",
+      },
+    });
+    const body = {
+      projectName: "Setup Project",
+      rootPath: tempDir,
+      providerKey: "openai",
+      providerKind: "openai",
+      providerStatus: "active",
+      secretEnv: "VIMBUS_TEST_KEY",
+      modelName: "GPT Test",
+      modelSlug: "gpt-test",
+      capabilities: ["tools", "json"],
+      slotKeys: ["executor_default"],
+    };
+
+    const firstSetup = await postJson(api, "/model-setup", body);
+    const secondSetup = await postJson(api, "/model-setup", body);
+    expect(firstSetup.status).toBe(201);
+    expect(secondSetup.status).toBe(201);
+
+    const setup = await secondSetup.json();
+    expect(setup.project.name).toBe("Setup Project");
+    expect(setup.provider.status).toBe("active");
+    expect(setup.slots).toHaveLength(1);
+
+    const testRef = await postJson(api, "/model-slots/executor_default/test", {
+      projectId: setup.project.id,
+      requiredCapabilities: ["json"],
+    });
+    const result = await testRef.json();
+
+    expect(result.ok).toBe(true);
+    expect(result.value.concreteModelName).toBe("openai:gpt-test");
+  });
+});
+
+describe("planner/task/approval API", () => {
+  let prisma: PrismaClient;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    const isolated = await createIsolatedPrisma("vimbus-api-");
+    prisma = isolated.prisma;
+    tempDir = isolated.tempDir;
+  });
+
+  afterEach(async () => {
+    await prisma.$disconnect();
+    removeTempDir(tempDir);
+  });
+
+  test("creates a project and planner run, stores interview answers, and persists proposals", async () => {
+    const api = createApp({ prisma });
+    const projectRef = await postJson(api, "/projects", {
+      name: "Planner Project",
+      rootPath: tempDir,
+    });
+    const project = await projectRef.json();
+
+    const plannerRunRef = await postJson(api, "/planner/runs", {
+      projectId: project.id,
+      goal: "Implement backend foundation",
+      moduleName: "api",
+    });
+    expect(plannerRunRef.status).toBe(201);
+    const plannerRun = await plannerRunRef.json();
+
+    const answerRef = await postJson(api, `/planner/runs/${plannerRun.id}/answers`, {
+      answers: {
+        scope: { in: ["api", "db"], out: ["cli"] },
+        verification: { required: ["logic"] },
+      },
+    });
+    expect(answerRef.status).toBe(200);
+    const answeredPlannerRun = await answerRef.json();
+    expect(answeredPlannerRun.interview.scope.in).toEqual(["api", "db"]);
+
+    const generateRef = await postJson(api, `/planner/runs/${plannerRun.id}/generate`, {
+      summary: "Persist proposal payload",
+      epics: [buildPlannerEpicPayload()],
+    });
+    expect(generateRef.status).toBe(200);
+    const generatedPlannerRun = await generateRef.json();
+
+    expect(generatedPlannerRun.status).toBe("generated");
+    expect(generatedPlannerRun.proposalSummary.taskCount).toBe(1);
+    expect(generatedPlannerRun.epics[0].tasks[0].status).toBe("planned");
+
+    const eventsRef = await api.fetch(new Request(`http://localhost/events?projectId=${project.id}`));
+    const events = await eventsRef.json();
+    expect(events.map((event: { type: string }) => event.type)).toContain("planner.answer");
+    expect(events.map((event: { type: string }) => event.type)).toContain("planner.proposed");
+  });
+
+  test("generates planner proposals through the planner service path", async () => {
+    const env = {
+      VIMBUS_TEST_KEY: "present",
+    };
+    const plannerService = createPlannerService({
+      prisma,
+      env,
+      generator: async () => ({
+        object: {
+          summary: "AI-backed planner proposal",
+          epics: [
+            {
+              key: "planner-slice",
+              title: "Planner Vertical Slice",
+              goal: "Generate structured planner output",
+              acceptance: ["planner run persists generated output"],
+              risks: ["slot assignment drift"],
+              tasks: [
+                {
+                  stableId: "persist-planner-proposal",
+                  title: "Persist planner proposal",
+                  description: "Write generated planner records through the repository layer",
+                  type: "backend",
+                  complexity: "medium",
+                  acceptance: ["proposal persisted"],
+                  targetFiles: ["packages/planner/src/index.ts", "apps/api/src/app.ts"],
+                  requires: ["planner_deep"],
+                  verificationPlan: {
+                    rationale: "Need one runnable verification check",
+                    items: [
+                      {
+                        kind: "logic",
+                        runner: "vitest",
+                        title: "planner proposal persists",
+                        description: "stores epics, tasks, and verification plans",
+                        command: "bun run test:vitest",
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    });
+    const api = createApp({
+      prisma,
+      env,
+      plannerService,
+    });
+
+    const projectRef = await postJson(api, "/projects", {
+      name: "Planner Service Project",
+      rootPath: tempDir,
+    });
+    const project = await projectRef.json();
+
+    const setupRef = await postJson(api, "/model-setup", {
+      projectId: project.id,
+      providerKey: "openai",
+      providerKind: "openai",
+      providerStatus: "active",
+      secretEnv: "VIMBUS_TEST_KEY",
+      modelName: "GPT Planner",
+      modelSlug: "gpt-planner",
+      capabilities: ["json"],
+      slotKeys: ["planner_deep"],
+    });
+    expect(setupRef.status).toBe(201);
+
+    const plannerRunRef = await postJson(api, "/planner/runs", {
+      projectId: project.id,
+      goal: "Implement planner vertical slice",
+      moduleName: "planner",
+    });
+    const plannerRun = await plannerRunRef.json();
+
+    await postJson(api, `/planner/runs/${plannerRun.id}/answers`, {
+      answers: {
+        scope: { in: ["packages/planner", "apps/api", "apps/cli"] },
+        verification: { required: ["logic", "integration"] },
+      },
+    });
+
+    const generateRef = await postJson(api, `/planner/runs/${plannerRun.id}/generate`, {});
+    expect(generateRef.status).toBe(200);
+    const generatedPlannerRun = await generateRef.json();
+
+    expect(generatedPlannerRun.status).toBe("generated");
+    expect(generatedPlannerRun.summary).toBe("AI-backed planner proposal");
+    expect(generatedPlannerRun.proposalSummary.taskCount).toBe(1);
+    expect(generatedPlannerRun.epics[0].key).toContain("PLAN-");
+    expect(generatedPlannerRun.epics[0].tasks[0].stableId).toContain("PLAN-");
+    expect(generatedPlannerRun.epics[0].tasks[0].status).toBe("planned");
+
+    const tasksRef = await api.fetch(new Request(`http://localhost/tasks?projectId=${project.id}`));
+    const tasks = await tasksRef.json();
+    expect(tasks[0].status).toBe("planned");
+
+    const events = await prisma.loopEvent.findMany({
+      where: { projectId: project.id },
+      orderBy: [{ createdAt: "asc" }],
+    });
+    expect(events.map((event) => event.type)).toContain("model.resolution.requested");
+    expect(events.map((event) => event.type)).toContain("model.resolution.succeeded");
+    expect(events.map((event) => event.type)).toContain("planner.proposed");
+  });
+
+  test("planner approval and verification approval advance task state in order", async () => {
+    const api = createApp({ prisma });
+    const { project, plannerRun } = await seedGeneratedPlannerRun(api, tempDir);
+
+    const beforeApprovalTasksRef = await api.fetch(new Request(`http://localhost/tasks?projectId=${project.id}`));
+    const beforeApprovalTasks = await beforeApprovalTasksRef.json();
+    expect(beforeApprovalTasks[0].status).toBe("planned");
+
+    const plannerApprovalRef = await postJson(api, "/approvals", {
+      projectId: project.id,
+      subjectType: "planner_run",
+      subjectId: plannerRun.id,
+      stage: "planner_review",
+      status: "granted",
+    });
+    expect(plannerApprovalRef.status).toBe(201);
+
+    const tasksAfterPlannerApprovalRef = await api.fetch(new Request(`http://localhost/tasks?projectId=${project.id}`));
+    const tasksAfterPlannerApproval = await tasksAfterPlannerApprovalRef.json();
+    expect(tasksAfterPlannerApproval[0].status).toBe("awaiting_verification_approval");
+
+    const taskDetailRef = await api.fetch(new Request(`http://localhost/tasks/${tasksAfterPlannerApproval[0].id}`));
+    const taskDetail = await taskDetailRef.json();
+    expect(taskDetail.latestVerificationPlan.status).toBe("proposed");
+
+    const verificationApprovalRef = await postJson(
+      api,
+      `/tasks/${tasksAfterPlannerApproval[0].id}/verification/approve`,
+      {
+        operator: "ak",
+      },
+    );
+    expect(verificationApprovalRef.status).toBe(200);
+    const approvedTask = await verificationApprovalRef.json();
+
+    expect(approvedTask.status).toBe("ready");
+    expect(approvedTask.latestVerificationPlan.status).toBe("approved");
+
+    const approvalsRef = await api.fetch(
+      new Request(
+        `http://localhost/approvals?subjectType=planner_run&subjectId=${plannerRun.id}&projectId=${project.id}`,
+      ),
+    );
+    const approvals = await approvalsRef.json();
+    expect(approvals).toHaveLength(1);
+  });
+
+  test("rejected planner runs do not advance generated tasks", async () => {
+    const api = createApp({ prisma });
+    const { project, plannerRun } = await seedGeneratedPlannerRun(api, tempDir);
+
+    const rejectionRef = await postJson(api, "/approvals", {
+      projectId: project.id,
+      subjectType: "planner_run",
+      subjectId: plannerRun.id,
+      stage: "planner_review",
+      status: "rejected",
+      reason: "Needs revision",
+    });
+    expect(rejectionRef.status).toBe(201);
+
+    const plannerRunDetailRef = await api.fetch(new Request(`http://localhost/planner/runs/${plannerRun.id}`));
+    const plannerRunDetail = await plannerRunDetailRef.json();
+    expect(plannerRunDetail.status).toBe("rejected");
+
+    const tasksRef = await api.fetch(new Request(`http://localhost/tasks?projectId=${project.id}`));
+    const tasks = await tasksRef.json();
+    expect(tasks[0].status).toBe("planned");
+  });
+});
+
+describe("execution API", () => {
+  let prisma: PrismaClient;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    const isolated = await createIsolatedPrisma("vimbus-execution-api-");
+    prisma = isolated.prisma;
+    tempDir = isolated.tempDir;
+    initializeGitRepository(tempDir, {
+      baseBranch: "main",
+      initialFiles: {
+        "README.md": "# execution api\n",
+      },
+    });
+  });
+
+  afterEach(async () => {
+    await prisma.$disconnect();
+    removeTempDir(tempDir);
+  });
+
+  test("creates, loads, and abandons a task branch through the API", async () => {
+    const api = createApp({
+      prisma,
+      env: {
+        VIMBUS_TEST_KEY: "present",
+      },
+    });
+    const { task } = await seedExecutableTask(api, tempDir, {
+      command: "echo ready",
+    });
+
+    const createBranchRef = await postJson(api, `/tasks/${task.id}/branch`, {});
+    expect(createBranchRef.status).toBe(200);
+    const branch = await createBranchRef.json();
+    expect(branch.state).toBe("created");
+
+    const getBranchRef = await api.fetch(new Request(`http://localhost/tasks/${task.id}/branch`));
+    expect(getBranchRef.status).toBe(200);
+    const loadedBranch = await getBranchRef.json();
+    expect(loadedBranch.name).toBe(branch.name);
+
+    const abandonBranchRef = await postJson(api, `/tasks/${task.id}/branch/abandon`, {});
+    expect(abandonBranchRef.status).toBe(200);
+    const abandonedBranch = await abandonBranchRef.json();
+    expect(abandonedBranch.state).toBe("abandoned");
+    expect(runCommand("git", ["branch", "--show-current"], tempDir).stdout.trim()).toBe("main");
+  }, 20000);
+
+  test("starts execution through the API and persists the model snapshot", async () => {
+    const api = createApp({
+      prisma,
+      env: {
+        VIMBUS_TEST_KEY: "present",
+      },
+    });
+    const { task } = await seedExecutableTask(api, tempDir, {
+      command: "echo execution-started",
+    });
+
+    const executeRef = await postJson(api, `/tasks/${task.id}/execute`, {});
+    expect(executeRef.status).toBe(201);
+    const execution = await executeRef.json();
+
+    expect(execution.status).toBe("implementing");
+    expect(execution.task.status).toBe("executing");
+    expect(execution.branch.state).toBe("active");
+    expect(execution.latestAgentStep.modelName).toBe("openai:gpt-test");
+    expect(execution.policy.modelResolution.concreteModelName).toBe("openai:gpt-test");
+    expect(runCommand("git", ["branch", "--show-current"], tempDir).stdout.trim()).toBe(execution.branch.name);
+  }, 20000);
+
+  test("runs verification, exposes patch state, and approves the patch in the happy path", async () => {
+    const api = createApp({
+      prisma,
+      env: {
+        VIMBUS_TEST_KEY: "present",
+      },
+    });
+    const { task } = await seedExecutableTask(api, tempDir, {
+      command: "echo verification-passed",
+    });
+    const executeRef = await postJson(api, `/tasks/${task.id}/execute`, {});
+    const execution = await executeRef.json();
+
+    writeProjectFile(tempDir, "README.md", "# execution api\nupdated execution output\n");
+
+    const runTestsRef = await postJson(api, `/executions/${execution.id}/test-runs`, {});
+    expect(runTestsRef.status).toBe(200);
+    const testRuns = await runTestsRef.json();
+    expect(testRuns).toHaveLength(1);
+    expect(testRuns[0].status).toBe("passed");
+
+    const listTestsRef = await api.fetch(new Request(`http://localhost/executions/${execution.id}/test-runs`));
+    expect(listTestsRef.status).toBe(200);
+    const listedTestRuns = await listTestsRef.json();
+    expect(listedTestRuns).toHaveLength(1);
+
+    const patchRef = await api.fetch(new Request(`http://localhost/executions/${execution.id}/patch`));
+    expect(patchRef.status).toBe(200);
+    const patch = await patchRef.json();
+    expect(patch.patchReview.status).toBe("ready");
+    expect(patch.patchReview.summary).toContain("file");
+
+    const approvePatchRef = await postJson(api, `/executions/${execution.id}/patch/approve`, {});
+    expect(approvePatchRef.status).toBe(200);
+    const approvedPatch = await approvePatchRef.json();
+
+    expect(approvedPatch.patchReview.status).toBe("approved");
+    expect(approvedPatch.execution.status).toBe("completed");
+    expect(approvedPatch.execution.task.status).toBe("completed");
+  }, 20000);
+
+  test("marks the task execution failed when verification command execution fails", async () => {
+    const api = createApp({
+      prisma,
+      env: {
+        VIMBUS_TEST_KEY: "present",
+      },
+    });
+    const { task } = await seedExecutableTask(api, tempDir, {
+      command: "exit 1",
+    });
+    const executeRef = await postJson(api, `/tasks/${task.id}/execute`, {});
+    const execution = await executeRef.json();
+
+    writeProjectFile(tempDir, "src/failing.ts", "export const broken = true;\n");
+
+    const runTestsRef = await postJson(api, `/executions/${execution.id}/test-runs`, {});
+    expect(runTestsRef.status).toBe(200);
+    const testRuns = await runTestsRef.json();
+    expect(testRuns[0].status).toBe("failed");
+
+    const storedExecution = await prisma.taskExecution.findUnique({
+      where: { id: execution.id },
+    });
+    const storedTask = await prisma.task.findUnique({
+      where: { id: task.id },
+    });
+    expect(storedExecution?.status).toBe("failed");
+    expect(storedTask?.status).toBe("failed");
+
+    const patchRef = await api.fetch(new Request(`http://localhost/executions/${execution.id}/patch`));
+    expect(patchRef.status).toBe(404);
+  }, 20000);
+
+  test("returns a strict 422 payload when approved items are not command-backed", async () => {
+    const api = createApp({
+      prisma,
+      env: {
+        VIMBUS_TEST_KEY: "present",
+      },
+    });
+    const { task } = await seedExecutableTask(api, tempDir, {
+      items: [
+        {
+          kind: "logic",
+          title: "command-backed verification",
+          description: "runs through the shell",
+          command: "echo ok",
+        },
+        {
+          kind: "visual",
+          runner: "playwright",
+          title: "visual review item",
+          description: "has no command in the current slice",
+          command: null,
+        },
+      ],
+    });
+    const executeRef = await postJson(api, `/tasks/${task.id}/execute`, {});
+    const execution = await executeRef.json();
+
+    const runTestsRef = await postJson(api, `/executions/${execution.id}/test-runs`, {});
+
+    expect(runTestsRef.status).toBe(422);
+    await expect(runTestsRef.json()).resolves.toMatchObject({
+      code: "UNSUPPORTED_VERIFICATION_ITEMS",
+      message: "This execution contains approved verification items that cannot be run by the command runner.",
+      items: [
+        {
+          kind: "visual",
+          title: "visual review item",
+        },
+      ],
+    });
+  });
+
+  test("returns a strict 422 payload when there are zero approved verification items", async () => {
+    const api = createApp({
+      prisma,
+      env: {
+        VIMBUS_TEST_KEY: "present",
+      },
+    });
+    const { task } = await seedExecutableTask(api, tempDir, {
+      command: "echo ok",
+    });
+
+    await prisma.verificationItem.updateMany({
+      where: {
+        taskId: task.id,
+      },
+      data: {
+        status: "skipped",
+      },
+    });
+
+    const executeRef = await postJson(api, `/tasks/${task.id}/execute`, {});
+    const execution = await executeRef.json();
+
+    const runTestsRef = await postJson(api, `/executions/${execution.id}/test-runs`, {});
+
+    expect(runTestsRef.status).toBe(422);
+    expect(await runTestsRef.json()).toEqual({
+      code: "NO_APPROVED_VERIFICATION_ITEMS",
+      message: "This execution has no approved verification items to run.",
+      items: [],
+    });
+  });
+});
+
+async function seedGeneratedPlannerRun(api: ReturnType<typeof createApp>, rootPath: string) {
+  const projectRef = await postJson(api, "/projects", {
+    name: "Foundation Project",
+    rootPath,
+  });
+  const project = await projectRef.json();
+
+  const plannerRunRef = await postJson(api, "/planner/runs", {
+    projectId: project.id,
+    goal: "Implement foundation",
+  });
+  const plannerRun = await plannerRunRef.json();
+
+  await postJson(api, `/planner/runs/${plannerRun.id}/generate`, {
+    summary: "One epic with one task",
+    epics: [buildPlannerEpicPayload()],
+  });
+
+  return { project, plannerRun };
+}
+
+async function seedExecutableTask(
+  api: ReturnType<typeof createApp>,
+  rootPath: string,
+  options: {
+    command?: string | null;
+    items?: SeedExecutionVerificationItem[];
+  },
+) {
+  const projectRef = await postJson(api, "/projects", {
+    name: "Execution Project",
+    rootPath,
+    baseBranch: "main",
+  });
+  const project = await projectRef.json();
+
+  const setupRef = await postJson(api, "/model-setup", {
+    projectId: project.id,
+    providerKey: "openai",
+    providerKind: "openai",
+    providerStatus: "active",
+    secretEnv: "VIMBUS_TEST_KEY",
+    modelName: "GPT Test",
+    modelSlug: "gpt-test",
+    capabilities: ["json"],
+    slotKeys: ["executor_default"],
+  });
+  expect(setupRef.status).toBe(201);
+
+  const plannerRunRef = await postJson(api, "/planner/runs", {
+    projectId: project.id,
+    goal: "Execute one approved task",
+    moduleName: "api",
+  });
+  const plannerRun = await plannerRunRef.json();
+
+  const generateRef = await postJson(api, `/planner/runs/${plannerRun.id}/generate`, {
+    summary: "Execution task proposal",
+    epics: [
+      {
+        key: "EXEC-EPIC-1",
+        title: "Execution Flow",
+        goal: "Execute and verify one task",
+        tasks: [
+          {
+            stableId: "EXEC-TASK-1",
+            title: "Execute backend task",
+            description: "Prepare branch, run verification, and patch review",
+            type: "backend",
+            complexity: "medium",
+            acceptance: [{ label: "execution persists state" }],
+            verificationPlan: {
+              rationale: "Need one deterministic command",
+              items: (options.items ?? buildDefaultExecutionVerificationItems(options.command ?? null)).map(
+                (item, index) => ({
+                  kind: item.kind,
+                  runner: item.runner ?? "custom",
+                  title: item.title,
+                  description: item.description,
+                  command: item.command ?? null,
+                  orderIndex: item.orderIndex ?? index,
+                }),
+              ),
+            },
+          },
+        ],
+      },
+    ],
+  });
+  expect(generateRef.status).toBe(200);
+
+  const approvePlannerRef = await postJson(api, "/approvals", {
+    projectId: project.id,
+    subjectType: "planner_run",
+    subjectId: plannerRun.id,
+    stage: "planner_review",
+    status: "granted",
+  });
+  expect(approvePlannerRef.status).toBe(201);
+
+  const tasksRef = await api.fetch(new Request(`http://localhost/tasks?projectId=${project.id}`));
+  const tasks = await tasksRef.json();
+  const task = tasks[0];
+  expect(task.status).toBe("awaiting_verification_approval");
+
+  const approveVerificationRef = await postJson(api, `/tasks/${task.id}/verification/approve`, {});
+  expect(approveVerificationRef.status).toBe(200);
+
+  return {
+    project,
+    task,
+  };
+}
+
+type SeedExecutionVerificationItem = {
+  kind: string;
+  runner?: string | null;
+  title: string;
+  description: string;
+  command?: string | null;
+  orderIndex?: number;
+};
+
+function buildDefaultExecutionVerificationItems(command: string | null): SeedExecutionVerificationItem[] {
+  return [
+    {
+      kind: "logic",
+      runner: "custom",
+      title: "verification command",
+      description: "runs one deterministic verification command",
+      command,
+    },
+  ];
+}
+
+function buildPlannerEpicPayload() {
+  return {
+    key: "EPIC-1",
+    title: "Backend Foundation",
+    goal: "Persist planner outputs",
+    orderIndex: 0,
+    acceptance: [{ label: "tasks exist" }],
+    risks: [{ label: "missing approval" }],
+    tasks: [
+      {
+        stableId: "TASK-1",
+        title: "Persist planner proposal",
+        description: "Write generated records",
+        type: "backend",
+        complexity: "medium",
+        orderIndex: 0,
+        acceptance: [{ label: "proposal persisted" }],
+        targetFiles: ["apps/api/src/app.ts"],
+        requires: ["database"],
+        verificationPlan: {
+          rationale: "Need one runnable verification plan",
+          items: [
+            {
+              kind: "logic",
+              runner: "vitest",
+              title: "planner persists records",
+              description: "stores epics, tasks, and verification plans",
+              command: "bun run test:vitest",
+              orderIndex: 0,
+            },
+          ],
+        },
+      },
+    ],
+  };
+}
+
+function postJson(api: ReturnType<typeof createApp>, path: string, body: unknown) {
+  return api.fetch(
+    new Request(`http://localhost${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }),
+  );
+}

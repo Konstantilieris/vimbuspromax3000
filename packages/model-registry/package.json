@@ -1,0 +1,13 @@
+{
+  "name": "@vimbuspromax3000/model-registry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@vimbuspromax3000/db": "workspace:*",
+    "@vimbuspromax3000/shared": "workspace:*"
+  }
+}

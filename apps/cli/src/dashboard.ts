@@ -1,0 +1,24 @@
+import { PRODUCT_NAME } from "@vimbuspromax3000/shared";
+import { MODEL_COMMANDS } from "./models";
+import { PLANNER_COMMANDS } from "./planner";
+
+export const DASHBOARD_COLUMNS = [
+  "Epics / Tasks",
+  "Control Panel",
+  "Eval / Tools / Logs",
+] as const;
+
+export function getDashboardLines(): string[] {
+  return [
+    `${PRODUCT_NAME} operator console`,
+    DASHBOARD_COLUMNS.join(" | "),
+    `Models: ${MODEL_COMMANDS.join(" ")}`,
+    `Planner: ${PLANNER_COMMANDS.join(" ")}`,
+    "No project loaded yet.",
+    "Health: bootstrap placeholder",
+  ];
+}
+
+export function getDashboardSnapshot(): string {
+  return getDashboardLines().join("\n");
+}
