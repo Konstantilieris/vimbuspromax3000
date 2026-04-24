@@ -372,6 +372,11 @@ async function loadPlannerModel(
   );
 }
 
+export {
+  getVerificationDeferredReason,
+  isVerificationItemRunnableNow,
+} from "@vimbuspromax3000/shared";
+
 function buildPlannerSystemPrompt() {
   return [
     "You are TaskGoblin's planner service.",
@@ -386,6 +391,14 @@ function buildPlannerSystemPrompt() {
     "Kind alone never makes a verification item runnable in this slice.",
     "Treat Playwright CLI as a normal shell command when needed; do not assume browser MCP or tool-session execution.",
     "If a visual or evidence check cannot be expressed as a shell command, it is not runnable by the current execution slice.",
+    "Per-kind field guidance:",
+    "- logic: set command (e.g. bun run test:vitest) and testFilePath pointing to the test file.",
+    "- integration: set command (e.g. bunx vitest run src/app.test.ts) and route for the API or module under test.",
+    "- typecheck: set command to bun run typecheck; no other required fields.",
+    "- lint: set command to bun run lint or equivalent; no other required fields.",
+    "- a11y: set command to a Playwright CLI command; set route and interaction describing the flow.",
+    "- visual: omit command if a shell equivalent does not exist; set route, interaction, and expectedAssetId as deferred metadata for operator review.",
+    "- evidence: omit command; set description to clearly state what the operator must inspect and where to find it.",
   ].join("\n");
 }
 
@@ -413,10 +426,10 @@ function buildPlannerPrompt(plannerRun: PlannerRunDetail) {
   lines.push("- Keep acceptance and risks specific.");
   lines.push("- Use arrays of strings for acceptance, risks, targetFiles, and requires.");
   lines.push("- Prefer command-backed verification items that can run through POST /executions/:id/test-runs.");
-  lines.push("- A verification item is executable in this slice only when it has a non-empty command.");
+  lines.push("- A verification item is runnable NOW only when it has a non-empty command field.");
   lines.push("- Treat Playwright CLI as a normal shell command only; do not assume MCP-backed browser execution.");
-  lines.push("- Non-command visual or evidence items are valid future review inputs, but they are not runnable now.");
-  lines.push("- Prefer logic, integration, typecheck, lint, a11y, visual, or evidence verification kinds.");
+  lines.push("- visual and evidence items without a shell command are valid deferred metadata but will NOT run.");
+  lines.push("- logic: fill testFilePath. integration: fill route. a11y: fill route and interaction. visual: fill route, interaction, expectedAssetId.");
 
   return lines.join("\n");
 }

@@ -8,6 +8,7 @@ import {
   PRODUCT_NAME,
   TASK_STATUSES,
   TEST_RUN_STATUSES,
+  getVerificationDeferredReason,
   isAgentStepStatus,
   isLoopEventType,
   isModelCapability,
@@ -16,6 +17,7 @@ import {
   isPlannerRunStatus,
   isTaskStatus,
   isTestRunStatus,
+  isVerificationItemRunnableNow,
 } from "./index";
 
 describe("shared domain constants", () => {
@@ -57,5 +59,39 @@ describe("shared domain constants", () => {
   test("maps known agent roles to deterministic model slots", () => {
     expect(DEFAULT_AGENT_ROLE_MODEL_SLOTS.executor).toBe("executor_default");
     expect(DEFAULT_AGENT_ROLE_MODEL_SLOTS.reviewer).toBe("reviewer");
+  });
+});
+
+describe("verification item runnability", () => {
+  test("isVerificationItemRunnableNow returns true for a non-empty command", () => {
+    expect(isVerificationItemRunnableNow("bun run test:vitest")).toBe(true);
+    expect(isVerificationItemRunnableNow("bunx playwright test")).toBe(true);
+  });
+
+  test("isVerificationItemRunnableNow returns false for null, undefined, empty, or whitespace", () => {
+    expect(isVerificationItemRunnableNow(null)).toBe(false);
+    expect(isVerificationItemRunnableNow(undefined)).toBe(false);
+    expect(isVerificationItemRunnableNow("")).toBe(false);
+    expect(isVerificationItemRunnableNow("   ")).toBe(false);
+  });
+
+  test("getVerificationDeferredReason returns null when the item has a command", () => {
+    expect(getVerificationDeferredReason("visual", "bunx playwright test")).toBeNull();
+    expect(getVerificationDeferredReason("logic", "bun run test:vitest")).toBeNull();
+    expect(getVerificationDeferredReason("evidence", "bun run collect-evidence")).toBeNull();
+  });
+
+  test("getVerificationDeferredReason returns kind-specific messages for deferred items", () => {
+    expect(getVerificationDeferredReason("visual", null)).toContain("Visual checks");
+    expect(getVerificationDeferredReason("evidence", null)).toContain("Evidence items");
+    expect(getVerificationDeferredReason("a11y", null)).toContain("Accessibility checks");
+    expect(getVerificationDeferredReason("integration", null)).toContain("Integration checks");
+    expect(getVerificationDeferredReason("logic", null)).toContain("No shell command");
+    expect(getVerificationDeferredReason("typecheck", null)).toContain("No shell command");
+    expect(getVerificationDeferredReason("lint", null)).toContain("No shell command");
+  });
+
+  test("getVerificationDeferredReason handles unknown kinds defensively", () => {
+    expect(getVerificationDeferredReason("unknown_kind", null)).toContain("No shell command");
   });
 });
