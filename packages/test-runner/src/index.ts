@@ -558,6 +558,9 @@ function resolveVisualVerificationMode(item: VerificationRunItem) {
   if (kind === "manual-evidence" || kind === "manual_evidence" || kind === "evidence") {
     return "manual-evidence";
   }
+  if (kind === "visual" && normalizeVisualToken(item.runner) === "playwright") {
+    return "screenshot";
+  }
 
   return "asset-presence";
 }

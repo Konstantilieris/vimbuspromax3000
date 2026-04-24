@@ -38,6 +38,7 @@ import {
   listLoopEvents,
   listMcpServers,
   listMcpToolCalls,
+  listMcpToolCallsForExecution,
   listProjects,
   listProjectSourceAssets,
   listRegressionBaselines,
@@ -490,7 +491,11 @@ export function createApp(options: ApiAppOptions = {}) {
   });
 
   app.get("/mcp/servers", async (context) => {
-    return context.json(await listMcpServers(prisma, requireProjectId(context.req.query("projectId"))));
+    const servers = await listMcpServers(prisma, requireProjectId(context.req.query("projectId")));
+
+    return context.json({
+      servers: servers.map(formatMcpServer),
+    });
   });
 
   app.post("/mcp/servers", async (context) => {
@@ -576,79 +581,91 @@ export function createApp(options: ApiAppOptions = {}) {
       return context.json({ error: "Task was not found." }, 404);
     }
 
-    return context.json(tools);
+    return context.json({
+      tools: tools.map(formatMcpTool),
+    });
   });
 
   app.get("/executions/:id/mcp/calls", async (context) => {
-    return context.json(
-      await listMcpToolCalls(prisma, {
-        taskExecutionId: context.req.param("id"),
-        status: context.req.query("status"),
-        limit: optionalNumber(context.req.query("limit")),
-      }),
-    );
+    const execution = await getTaskExecutionDetail(prisma, context.req.param("id"));
+
+    if (!execution) {
+      return context.json({ error: "Execution was not found." }, 404);
+    }
+
+    const calls = await listMcpToolCallsForExecution(prisma, execution.id);
+    const status = context.req.query("status");
+    const limit = optionalNumber(context.req.query("limit")) ?? calls.length;
+
+    return context.json({
+      calls: calls
+        .filter((call) => !status || call.status === status)
+        .slice(0, limit)
+        .map(formatMcpCall),
+    });
   });
 
   app.post("/executions/:id/mcp/calls", async (context) => {
     const body = await context.req.json();
-    const execution = await prisma.taskExecution.findUnique({
-      where: { id: context.req.param("id") },
-      include: { task: { include: { epic: true } } },
-    });
+    const execution = await getTaskExecutionDetail(prisma, context.req.param("id"));
 
     if (!execution) {
       return context.json({ error: "Task execution was not found." }, 404);
     }
 
-    return context.json(
-      await createMcpToolCall(prisma, {
-        projectId: execution.task.epic.projectId,
-        taskExecutionId: execution.id,
-        toolId: optionalString(body.toolId) ?? null,
-        serverName: requireString(body.serverName, "serverName"),
-        toolName: requireString(body.toolName, "toolName"),
-        status: optionalString(body.status) ?? "requested",
-        mutability: optionalString(body.mutability) ?? "read",
-        approvalId: optionalString(body.approvalId) ?? null,
-        argumentsHash: optionalString(body.argumentsHash) ?? null,
-        argumentsJson: body.argumentsJson ? JSON.stringify(body.argumentsJson) : null,
-        resultSummary: optionalString(body.resultSummary) ?? null,
-        errorSummary: optionalString(body.errorSummary) ?? null,
-        latencyMs: optionalInteger(body.latencyMs),
-      }),
-      201,
-    );
+    const rawArgs = body.args ?? body.arguments ?? {};
+    const call = await mcpService.createToolCall({
+      projectId: execution.task.epic.project.id,
+      taskExecutionId: execution.id,
+      serverName: requireString(body.serverName, "serverName"),
+      toolName: requireString(body.toolName, "toolName"),
+      args: requireRecord(rawArgs, "args"),
+    });
+
+    return context.json({ call: formatMcpCall(call) }, 201);
   });
 
   app.post("/executions/:executionId/mcp/calls/:callId/approve", async (context) => {
-    const body = await optionalJsonBody(context.req);
-    const call = await prisma.mcpToolCall.findUnique({
-      where: { id: context.req.param("callId") },
-    });
+    const execution = await getTaskExecutionDetail(prisma, context.req.param("executionId"));
 
-    if (!call || call.taskExecutionId !== context.req.param("executionId")) {
+    if (!execution) {
+      return context.json({ error: "Execution was not found." }, 404);
+    }
+
+    const call = await getMcpToolCallDetail(prisma, context.req.param("callId"));
+
+    if (!call) {
       return context.json({ error: "MCP tool call was not found." }, 404);
     }
 
-    const approval = await createApprovalDecision(prisma, {
-      projectId: optionalString(body.projectId) ?? call.projectId,
-      subjectType: "mutating_tool_call",
-      subjectId: call.id,
-      stage: optionalString(body.stage) ?? "mcp_tool_call",
-      status: "granted",
-      operator: optionalString(body.operator),
+    if (call.taskExecutionId !== execution.id) {
+      return context.json(
+        { error: "Tool call does not belong to this execution.", code: "CALL_NOT_IN_EXECUTION" },
+        422,
+      );
+    }
+
+    if (!(call.tool?.approvalRequired ?? false)) {
+      return context.json({ error: "Tool call does not require approval.", code: "APPROVAL_NOT_REQUIRED" }, 422);
+    }
+
+    if (call.status !== "requested") {
+      return context.json({ error: "Tool call is not in requested state.", code: "CALL_NOT_PENDING" }, 422);
+    }
+
+    const body = await context.req.json();
+    const updated = await mcpService.approveToolCall(call.id, {
+      operator: requireString(body.operator, "operator"),
       reason: optionalString(body.reason),
+      projectId: execution.task.epic.project.id,
     });
+    const callDto = formatMcpCall(updated);
 
-    await prisma.mcpToolCall.update({
-      where: { id: call.id },
-      data: {
-        status: "approved",
-        approvalId: approval.id,
-      },
+    return context.json({
+      id: callDto.id,
+      status: callDto.status,
+      call: callDto,
     });
-
-    return context.json(approval);
   });
 
   app.post("/executions/:id/mcp/calls/:callId/execute", async (context) => {
@@ -1147,6 +1164,56 @@ function optionalNumber(value: string | undefined): number | undefined {
   return parsed;
 }
 
+function formatMcpServer(server: {
+  id: string;
+  name: string;
+  transport: string;
+  endpoint?: string | null;
+  trustLevel: string;
+  status: string;
+  authType?: string | null;
+  credentialRefId?: string | null;
+  lastVerifiedAt?: Date | string | null;
+  lastError?: string | null;
+  tools?: unknown[];
+}) {
+  return {
+    id: server.id,
+    name: server.name,
+    transport: server.transport,
+    endpoint: server.endpoint ?? null,
+    trustLevel: server.trustLevel,
+    status: server.status,
+    authType: server.authType ?? "none",
+    credentialRefId: server.credentialRefId ?? null,
+    lastVerifiedAt: server.lastVerifiedAt ?? null,
+    lastError: server.lastError ?? null,
+    toolCount: server.tools?.length ?? 0,
+  };
+}
+
+function formatMcpTool(tool: {
+  id?: string;
+  name: string;
+  description?: string | null;
+  mutability: string;
+  approvalRequired: boolean;
+  inputSchemaJson?: string | null;
+  status?: string | null;
+  server: { name: string };
+}) {
+  return {
+    id: tool.id,
+    serverName: tool.server.name,
+    name: tool.name,
+    description: tool.description ?? null,
+    mutability: tool.mutability,
+    approvalRequired: tool.approvalRequired,
+    inputSchema: parseJsonObject(tool.inputSchemaJson),
+    status: tool.status ?? "active",
+  };
+}
+
 function formatMcpCall(call: {
   id: string;
   taskExecutionId?: string | null;
@@ -1359,6 +1426,8 @@ async function persistMcpServerSetupPayload(prisma: PrismaClient, payload: McpSe
     trustLevel: payload.trustLevel,
     status: payload.status,
     authType: payload.authType,
+    credentialEnv: payload.credentialEnv,
+    credentialLabel: payload.credentialLabel,
     configJson: JSON.stringify(payload.config),
   });
 

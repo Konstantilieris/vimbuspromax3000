@@ -29,6 +29,12 @@ const committedMemoryFiles = [
   "slack-config.template.md",
 ];
 
+const localMemoryFiles = [
+  "jira-config.md",
+  "team-defaults.md",
+  "slack-config.md",
+];
+
 const forbiddenResidues = [
   "Holocomm",
   "HC",
@@ -70,7 +76,9 @@ describe("project-manager pack smoke test", () => {
   });
 
   test("commits only templates plus MEMORY.md in the project-manager memory directory", async () => {
-    const filenames = (await readdir(memoryDir)).sort();
+    const filenames = (await readdir(memoryDir))
+      .filter((filename) => !localMemoryFiles.includes(filename))
+      .sort();
 
     expect(filenames).toEqual([...committedMemoryFiles].sort());
   });

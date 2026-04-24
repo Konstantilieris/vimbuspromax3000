@@ -73,7 +73,7 @@ export type ApiMcpServer = {
   status: McpServerStatus | string;
   authType: McpServerAuthType | string;
   credentialRefId?: string | null;
-  lastVerifiedAt?: string | null;
+  lastVerifiedAt?: Date | string | null;
   lastError?: string | null;
   configJson?: string | null;
   credentialRef?: ApiMcpCredentialRef | null;

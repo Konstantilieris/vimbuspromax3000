@@ -560,6 +560,11 @@ describe("execution API", () => {
     expect(projectRef.status).toBe(201);
     const project = await projectRef.json();
 
+    const mcpSetupRef = await postJson(api, `/mcp/setup?projectId=${project.id}`, {
+      activate: true,
+    });
+    expect(mcpSetupRef.status).toBe(201);
+
     const modelSetupRef = await postJson(api, "/model-setup", {
       projectId: project.id,
       providerKey: "openai",
