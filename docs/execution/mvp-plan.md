@@ -6,7 +6,7 @@ This file is the canonical MVP tracker. Keep it current whenever implementation 
 
 ## Current Position
 
-Status: **Execution backend foundation complete; CLI console and richer verification next**.
+Status: **CLI console and verification slices complete; MCP is next**.
 
 Completed foundations:
 
@@ -43,7 +43,7 @@ Completed foundations:
   - patch-review metadata routes backed by current git diff summary and approval/rejection state
   - isolated SQLite + git fixture tests for repositories, services, API integration, and happy-path execution
 
-Immediate gap: the operator-facing console and richer verification materialization still need to be built. MCP-backed verification, evaluation, and non-command visual/evidence execution remain deferred.
+Immediate gap: MCP client and tool-call approval gates are next. Evaluation, visual verification, and non-command evidence execution remain deferred.
 
 ## MVP Finish Line
 
@@ -87,8 +87,8 @@ Legend: `done`, `active`, `next`, `later`.
 | done | Execution | Implement deterministic branch prep, minimal execution start, policy snapshot persistence, and execution routes. |
 | done | Test Runner | Execute approved command-backed verification items only, reject unsupported items with 422 payloads, persist stdout/stderr paths plus deterministic artifacts, and emit loop events. |
 | done | Patch Review | Persist diff summary metadata plus patch approval/rejection and completion state. |
-| next | CLI Console | Extend CLI views to executions, events, and patch review. |
-| next | Verification | Implement richer verification contract generation, planner/review feedback, and future non-command runtime handling beyond the current command-only slice. |
+| done | CLI Console | Extend CLI views to executions, events, and patch review. |
+| done | Verification | Implement richer verification contract generation, planner/review feedback, and future non-command runtime handling beyond the current command-only slice. |
 | later | MCP | Add MCP client and minimal fs/git/shell server wrappers with approval gates. |
 | later | Evaluation | Add rule-based evaluation after verification and before patch review. |
 | later | Visual | Add source asset ingestion, screenshot capture, and pixel/PDF checks. |
