@@ -54,6 +54,34 @@ export const VERIFICATION_ITEM_KINDS = [
 export type VerificationItemKind = (typeof VERIFICATION_ITEM_KINDS)[number];
 export const isVerificationItemKind = createEnumGuard(VERIFICATION_ITEM_KINDS);
 
+export function isVerificationItemRunnableNow(command: string | null | undefined): boolean {
+  return typeof command === "string" && command.trim().length > 0;
+}
+
+export function getVerificationDeferredReason(
+  kind: VerificationItemKind | string,
+  command: string | null | undefined,
+): string | null {
+  if (isVerificationItemRunnableNow(command)) return null;
+
+  if (!isVerificationItemKind(kind)) {
+    return "No shell command provided — this item is deferred and will not run through POST /executions/:id/test-runs.";
+  }
+
+  switch (kind) {
+    case "visual":
+      return "Visual checks require a shell command or are deferred to a later MCP-backed slice.";
+    case "evidence":
+      return "Evidence items require human review and cannot be executed by the command runner.";
+    case "a11y":
+      return "Accessibility checks require a shell command to be runnable now.";
+    case "integration":
+      return "Integration checks require a shell command to be runnable now.";
+    default:
+      return "No shell command provided — this item is deferred and will not run through POST /executions/:id/test-runs.";
+  }
+}
+
 export const VERIFICATION_RUNNERS = [
   "vitest",
   "jest",

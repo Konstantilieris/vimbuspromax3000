@@ -781,6 +781,128 @@ function buildPlannerEpicPayload() {
   };
 }
 
+describe("verification review API", () => {
+  let prisma: PrismaClient;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    const isolated = await createIsolatedPrisma("vimbus-verification-");
+    prisma = isolated.prisma;
+    tempDir = isolated.tempDir;
+  });
+
+  afterEach(async () => {
+    await prisma.$disconnect();
+    removeTempDir(tempDir);
+  });
+
+  test("GET /tasks/:id/verification returns 404 for unknown task", async () => {
+    const api = createApp({ prisma });
+    const response = await api.fetch(new Request("http://localhost/tasks/nonexistent/verification"));
+
+    expect(response.status).toBe(404);
+  });
+
+  test("GET /tasks/:id/verification returns plan=null summary=null when no plan exists", async () => {
+    const api = createApp({ prisma });
+    const project = await prisma.project.create({
+      data: { name: "Test", rootPath: tempDir, baseBranch: "main" },
+    });
+    const plannerRun = await prisma.plannerRun.create({
+      data: { projectId: project.id, goal: "test", status: "interviewing" },
+    });
+    const epic = await prisma.epic.create({
+      data: { plannerRunId: plannerRun.id, projectId: project.id, key: "E-1", title: "E", goal: "G", orderIndex: 0, status: "proposed", acceptanceJson: "[]" },
+    });
+    const task = await prisma.task.create({
+      data: { epicId: epic.id, stableId: "T-1", title: "T", type: "backend", complexity: "low", orderIndex: 0, status: "proposed", acceptanceJson: "[]" },
+    });
+
+    const response = await api.fetch(new Request(`http://localhost/tasks/${task.id}/verification`));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.taskId).toBe(task.id);
+    expect(body.plan).toBeNull();
+    expect(body.summary).toBeNull();
+  });
+
+  test("GET /tasks/:id/verification returns runnableNow and deferredReason per item", async () => {
+    const api = createApp({ prisma });
+    const project = await prisma.project.create({
+      data: { name: "Test", rootPath: tempDir, baseBranch: "main" },
+    });
+    const plannerRun = await prisma.plannerRun.create({
+      data: { projectId: project.id, goal: "test", status: "generating" },
+    });
+    const epic = await prisma.epic.create({
+      data: { plannerRunId: plannerRun.id, projectId: project.id, key: "E-1", title: "E", goal: "G", orderIndex: 0, status: "proposed", acceptanceJson: "[]" },
+    });
+    const task = await prisma.task.create({
+      data: { epicId: epic.id, stableId: "T-1", title: "T", type: "backend", complexity: "low", orderIndex: 0, status: "proposed", acceptanceJson: "[]" },
+    });
+    const plan = await prisma.verificationPlan.create({
+      data: { taskId: task.id, status: "proposed", rationale: "test plan" },
+    });
+    await prisma.verificationItem.createMany({
+      data: [
+        { planId: plan.id, taskId: task.id, kind: "logic", title: "unit test", description: "runs vitest", command: "bun run test:vitest", status: "proposed", orderIndex: 0 },
+        { planId: plan.id, taskId: task.id, kind: "visual", title: "screenshot check", description: "compare baseline", command: null, status: "proposed", orderIndex: 1, route: "/tasks" },
+      ],
+    });
+
+    const response = await api.fetch(new Request(`http://localhost/tasks/${task.id}/verification`));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+
+    expect(body.summary.totalCount).toBe(2);
+    expect(body.summary.runnableCount).toBe(1);
+    expect(body.summary.deferredCount).toBe(1);
+    expect(body.summary.allRunnableNow).toBe(false);
+
+    const logicItem = body.plan.items[0];
+    expect(logicItem.runnableNow).toBe(true);
+    expect(logicItem.deferredReason).toBeNull();
+
+    const visualItem = body.plan.items[1];
+    expect(visualItem.runnableNow).toBe(false);
+    expect(visualItem.deferredReason).toContain("Visual checks");
+    expect(visualItem.route).toBe("/tasks");
+  });
+
+  test("GET /tasks/:id/verification summary shows allRunnableNow=true when all items have commands", async () => {
+    const api = createApp({ prisma });
+    const project = await prisma.project.create({
+      data: { name: "Test", rootPath: tempDir, baseBranch: "main" },
+    });
+    const plannerRun = await prisma.plannerRun.create({
+      data: { projectId: project.id, goal: "test", status: "generating" },
+    });
+    const epic = await prisma.epic.create({
+      data: { plannerRunId: plannerRun.id, projectId: project.id, key: "E-1", title: "E", goal: "G", orderIndex: 0, status: "proposed", acceptanceJson: "[]" },
+    });
+    const task = await prisma.task.create({
+      data: { epicId: epic.id, stableId: "T-1", title: "T", type: "backend", complexity: "low", orderIndex: 0, status: "proposed", acceptanceJson: "[]" },
+    });
+    const plan = await prisma.verificationPlan.create({
+      data: { taskId: task.id, status: "proposed", rationale: "all runnable" },
+    });
+    await prisma.verificationItem.createMany({
+      data: [
+        { planId: plan.id, taskId: task.id, kind: "logic", title: "unit test", description: "vitest", command: "bun run test:vitest", status: "proposed", orderIndex: 0 },
+        { planId: plan.id, taskId: task.id, kind: "typecheck", title: "typecheck", description: "tsc", command: "bun run typecheck", status: "proposed", orderIndex: 1 },
+      ],
+    });
+
+    const response = await api.fetch(new Request(`http://localhost/tasks/${task.id}/verification`));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.summary.allRunnableNow).toBe(true);
+    expect(body.summary.runnableCount).toBe(2);
+    expect(body.summary.deferredCount).toBe(0);
+    expect(body.plan.items.every((item: { runnableNow: boolean }) => item.runnableNow)).toBe(true);
+  });
+});
+
 function postJson(api: ReturnType<typeof createApp>, path: string, body: unknown) {
   return api.fetch(
     new Request(`http://localhost${path}`, {

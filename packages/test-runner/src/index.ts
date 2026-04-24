@@ -16,6 +16,7 @@ import {
   updateTaskExecution,
   updateTestRun,
 } from "@vimbuspromax3000/db";
+import { isVerificationItemRunnableNow } from "@vimbuspromax3000/shared";
 
 export type TestRunnerEligibilityErrorCode =
   | "NO_APPROVED_VERIFICATION_ITEMS"
@@ -116,7 +117,7 @@ export function createTestRunnerService(options: {
       }
 
       const unsupportedItems = items
-        .filter((item) => !hasExecutableCommand(item.command))
+        .filter((item) => !isVerificationItemRunnableNow(item.command))
         .map((item) => ({
           id: item.id,
           kind: item.kind,
@@ -408,10 +409,6 @@ async function requireExecutionVerificationContext(prisma: PrismaClient, executi
   }
 
   return execution;
-}
-
-function hasExecutableCommand(command: string | null | undefined) {
-  return typeof command === "string" && command.trim().length > 0;
 }
 
 function buildTestRunArtifactDirectory(input: CommandRunnerInput) {

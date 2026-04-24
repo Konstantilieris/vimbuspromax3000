@@ -1,5 +1,14 @@
+import { getVerificationDeferredReason, isVerificationItemRunnableNow } from "@vimbuspromax3000/shared";
 import { createApprovalDecision } from "./approvalRepository";
 import type { DatabaseClient } from "./types";
+
+function enrichItem<T extends { kind: string; command: string | null }>(item: T) {
+  return {
+    ...item,
+    runnableNow: isVerificationItemRunnableNow(item.command),
+    deferredReason: getVerificationDeferredReason(item.kind, item.command),
+  };
+}
 
 export type ListTasksInput = {
   projectId: string;
@@ -83,10 +92,62 @@ export async function getTaskDetail(db: DatabaseClient, taskId: string) {
     orderBy: [{ createdAt: "asc" }],
   });
 
+  const enrichedPlan = latestPlan
+    ? {
+        ...latestPlan,
+        items: latestPlan.items.map(enrichItem),
+      }
+    : null;
+
   return {
     ...task,
-    latestVerificationPlan: latestPlan ?? null,
+    latestVerificationPlan: enrichedPlan,
     approvals,
+  };
+}
+
+export async function getTaskVerificationReview(db: DatabaseClient, taskId: string) {
+  const task = await db.task.findUnique({
+    where: { id: taskId },
+    include: {
+      verificationPlans: {
+        orderBy: [{ createdAt: "desc" }],
+        take: 1,
+        include: {
+          items: {
+            orderBy: [{ orderIndex: "asc" }],
+          },
+        },
+      },
+    },
+  });
+
+  if (!task) {
+    return null;
+  }
+
+  const latestPlan = task.verificationPlans[0] ?? null;
+
+  if (!latestPlan) {
+    return { taskId, plan: null, summary: null };
+  }
+
+  const enrichedItems = latestPlan.items.map(enrichItem);
+  const runnableCount = enrichedItems.filter((item) => item.runnableNow).length;
+  const deferredCount = enrichedItems.length - runnableCount;
+
+  return {
+    taskId,
+    plan: {
+      ...latestPlan,
+      items: enrichedItems,
+    },
+    summary: {
+      totalCount: enrichedItems.length,
+      runnableCount,
+      deferredCount,
+      allRunnableNow: deferredCount === 0 && enrichedItems.length > 0,
+    },
   };
 }
 

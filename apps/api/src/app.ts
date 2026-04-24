@@ -8,6 +8,7 @@ import {
   createPrismaClient,
   getPlannerRunDetail,
   getTaskDetail,
+  getTaskVerificationReview,
   listApprovals,
   listLoopEvents,
   listProjects,
@@ -205,6 +206,16 @@ export function createApp(options: ApiAppOptions = {}) {
     }
 
     return context.json(task);
+  });
+
+  app.get("/tasks/:id/verification", async (context) => {
+    const review = await getTaskVerificationReview(prisma, context.req.param("id"));
+
+    if (!review) {
+      return context.json({ error: "Task was not found." }, 404);
+    }
+
+    return context.json(review);
   });
 
   app.post("/tasks/:id/verification/approve", async (context) => {
