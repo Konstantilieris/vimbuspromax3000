@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "atlassian": {
+      "type": "http",
+      "url": "https://mcp.atlassian.com/v1/mcp",
+      "note": "Atlassian MCP scaffold for native Codex Jira operations. Live Jira work still requires Atlassian authentication plus `.claude/agent-memory/project-manager/jira-config.md`."
+    }
+  }
+}

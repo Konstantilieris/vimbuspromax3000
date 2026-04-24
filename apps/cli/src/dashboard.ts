@@ -1,5 +1,6 @@
 import { PRODUCT_NAME } from "@vimbuspromax3000/shared";
 import { EXECUTION_COMMANDS } from "./execution";
+import { MCP_COMMANDS } from "./mcp";
 import { MODEL_COMMANDS } from "./models";
 import { PLANNER_COMMANDS } from "./planner";
 
@@ -14,6 +15,7 @@ export function getDashboardLines(): string[] {
     `${PRODUCT_NAME} operator console`,
     DASHBOARD_COLUMNS.join(" | "),
     `Models: ${MODEL_COMMANDS.join(" ")}`,
+    `MCP: ${MCP_COMMANDS.join(" ")}`,
     `Planner: ${PLANNER_COMMANDS.join(" ")}`,
     `Execution: ${EXECUTION_COMMANDS.join(" ")}`,
     "No project loaded yet.",

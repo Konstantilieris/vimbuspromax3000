@@ -1,0 +1,15 @@
+interface:
+  display_name: "TaskGoblin Jira Operator"
+  short_description: "Dry-run-first Jira workflow for TaskGoblin"
+  default_prompt: "Use $taskgoblin-jira-operator to dry-run Jira ticket creation for an approved TaskGoblin breakdown."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "atlassian"
+      description: "Atlassian MCP scaffold for Jira dry-runs and ticket creation"
+      transport: "streamable_http"
+      url: "https://mcp.atlassian.com/v1/mcp"
+
+policy:
+  allow_implicit_invocation: true

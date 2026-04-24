@@ -1,0 +1,7 @@
+interface:
+  display_name: "TaskGoblin Roadmap Planner"
+  short_description: "Build TaskGoblin roadmap scenarios"
+  default_prompt: "Use $taskgoblin-roadmap-planner to build a roadmap for this TaskGoblin initiative."
+
+policy:
+  allow_implicit_invocation: true

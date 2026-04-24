@@ -1,0 +1,20 @@
+{
+  "name": "taskgoblin-local",
+  "interface": {
+    "displayName": "TaskGoblin Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "taskgoblin-project-manager",
+      "source": {
+        "source": "local",
+        "path": "./plugins/taskgoblin-project-manager"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

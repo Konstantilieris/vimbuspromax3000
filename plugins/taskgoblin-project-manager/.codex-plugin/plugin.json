@@ -1,0 +1,43 @@
+{
+  "name": "taskgoblin-project-manager",
+  "version": "0.1.0",
+  "description": "Native Codex mirror of the TaskGoblin PM and Jira operator pack",
+  "author": {
+    "name": "[TODO: author-name]",
+    "email": "[TODO: author-email]",
+    "url": "[TODO: author-url]"
+  },
+  "homepage": "[TODO: homepage-url]",
+  "repository": "[TODO: repository-url]",
+  "license": "[TODO: license]",
+  "keywords": [
+    "taskgoblin",
+    "project-management",
+    "jira",
+    "sprint-planning",
+    "roadmap-planning",
+    "operator-workflow"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "TaskGoblin Project Manager",
+    "shortDescription": "Operator-side planning, Jira, sprint, and roadmap workflows",
+    "longDescription": "Native Codex packaging for the TaskGoblin operator-side PM pack. Mirrors the repo-local `.claude/agents` source pack, adds native skill discovery, and ships safe connector scaffolding for Jira with Slack left as placeholder-only configuration.",
+    "developerName": "[TODO: developer-name]",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "[TODO: website-url]",
+    "privacyPolicyURL": "[TODO: privacy-policy-url]",
+    "termsOfServiceURL": "[TODO: terms-of-service-url]",
+    "defaultPrompt": [
+      "Plan a TaskGoblin change and prepare a Jira dry-run",
+      "Break down this TaskGoblin feature into sprint-ready work",
+      "Build a roadmap for TaskGoblin verification and MCP work"
+    ],
+    "brandColor": "#0F172A"
+  }
+}

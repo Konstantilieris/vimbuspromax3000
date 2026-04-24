@@ -1,0 +1,7 @@
+interface:
+  display_name: "TaskGoblin Sprint Planner"
+  short_description: "Plan TaskGoblin work across sprints"
+  default_prompt: "Use $taskgoblin-sprint-planner to allocate this TaskGoblin breakdown across realistic sprints."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "TaskGoblin Codebase Analyst"
+  short_description: "Analyze TaskGoblin modules, docs, and risk"
+  default_prompt: "Use $taskgoblin-codebase-analyst to map the affected TaskGoblin modules and planning risks."
+
+policy:
+  allow_implicit_invocation: true

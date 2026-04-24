@@ -1,0 +1,7 @@
+interface:
+  display_name: "TaskGoblin Work Breakdown"
+  short_description: "Break TaskGoblin work into delivery items"
+  default_prompt: "Use $taskgoblin-work-breakdown to turn this TaskGoblin change into epics, stories, and tasks."
+
+policy:
+  allow_implicit_invocation: true

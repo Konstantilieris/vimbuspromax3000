@@ -9,3 +9,8 @@ export * from "./taskRepository";
 export * from "./testRunRepository";
 export * from "./patchReviewRepository";
 export * from "./mcpRepository";
+export * from "./sourceAssetRepository";
+export * from "./visualVerificationRepository";
+export * from "./evaluationRepository";
+export * from "./benchmarkRepository";
+export * from "./langSmithRepository";

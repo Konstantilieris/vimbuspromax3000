@@ -389,6 +389,140 @@ describe("planner/task/approval API", () => {
   });
 });
 
+describe("MVP integration APIs", () => {
+  let prisma: PrismaClient;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    const isolated = await createIsolatedPrisma("vimbus-mvp-api-");
+    prisma = isolated.prisma;
+    tempDir = isolated.tempDir;
+  });
+
+  afterEach(async () => {
+    await prisma.$disconnect();
+    removeTempDir(tempDir);
+  });
+
+  test("sets up MCP servers idempotently and stores env-backed credentials", async () => {
+    const api = createApp({ prisma });
+    const project = await prisma.project.create({
+      data: {
+        name: "MCP Project",
+        rootPath: tempDir,
+        baseBranch: "main",
+      },
+    });
+
+    const firstSetupRef = await postJson(api, `/mcp/setup?projectId=${project.id}`, { activate: true });
+    const secondSetupRef = await postJson(api, `/mcp/setup?projectId=${project.id}`, { activate: true });
+    expect(firstSetupRef.status).toBe(201);
+    expect(secondSetupRef.status).toBe(201);
+    const firstSetup = await firstSetupRef.json();
+    const secondSetup = await secondSetupRef.json();
+
+    expect(firstSetup.created.length).toBeGreaterThan(0);
+    expect(secondSetup.unchanged.length).toBe(firstSetup.created.length);
+
+    const credentialRef = await postJson(api, `/mcp/servers/${firstSetup.created[0].id}/credential`, {
+      credentialEnv: "DATABASE_URL",
+      credentialLabel: "db env",
+    });
+    expect(credentialRef.status).toBe(200);
+    const serverWithCredential = await credentialRef.json();
+    expect(serverWithCredential.credentialRef.reference).toBe("DATABASE_URL");
+  });
+
+  test("ingests source assets and approval decisions approve them", async () => {
+    const api = createApp({ prisma });
+    const project = await prisma.project.create({
+      data: {
+        name: "Visual Project",
+        rootPath: tempDir,
+        baseBranch: "main",
+      },
+    });
+    writeProjectFile(tempDir, "docs/assets/reference.txt", "visual source\n");
+
+    const assetRef = await postJson(api, `/projects/${project.id}/source-assets`, {
+      relativePath: "docs/assets/reference.txt",
+    });
+    expect(assetRef.status).toBe(201);
+    const asset = await assetRef.json();
+    expect(asset.status).toBe("proposed");
+    expect(asset.sha256).toMatch(/^[a-f0-9]{64}$/);
+
+    const approvalRef = await postJson(api, "/approvals", {
+      projectId: project.id,
+      subjectType: "source_of_truth_asset",
+      subjectId: asset.id,
+      stage: "visual_source_review",
+      status: "granted",
+    });
+    expect(approvalRef.status).toBe(201);
+
+    const storedAsset = await prisma.sourceOfTruthAsset.findUnique({ where: { id: asset.id } });
+    expect(storedAsset?.status).toBe("approved");
+    expect(storedAsset?.approvedAt).toBeTruthy();
+  });
+
+  test("runs benchmarks, creates baselines, compares regressions, and stores LangSmith links", async () => {
+    const api = createApp({ prisma });
+    const project = await prisma.project.create({
+      data: {
+        name: "Benchmark Project",
+        rootPath: tempDir,
+        baseBranch: "main",
+      },
+    });
+
+    const scenarioRef = await postJson(api, "/benchmarks/scenarios", {
+      projectId: project.id,
+      name: "happy path",
+      goal: "Pass deterministic route scoring.",
+      expectedTools: ["planner.plan"],
+      expectedVerificationItems: ["unit"],
+      passThreshold: 70,
+    });
+    expect(scenarioRef.status).toBe(201);
+    const scenario = await scenarioRef.json();
+
+    const runRef = await postJson(api, `/benchmarks/scenarios/${scenario.id}/run`, {
+      runId: "run-1",
+      toolCalls: [{ server: "planner", name: "planner.plan", status: "succeeded" }],
+      verificationItems: [{ name: "unit", status: "passed" }],
+    });
+    expect(runRef.status).toBe(201);
+    const runPayload = await runRef.json();
+    expect(runPayload.run.verdict).toBe("passed");
+
+    const baselineRef = await postJson(api, "/regressions/baselines", {
+      projectId: project.id,
+      benchmarkScenarioId: scenario.id,
+      evalRunId: runPayload.evalRun.id,
+    });
+    expect(baselineRef.status).toBe(201);
+
+    const compareRef = await postJson(api, "/regressions/compare", {
+      projectId: project.id,
+      benchmarkScenarioId: scenario.id,
+      evalRunId: runPayload.evalRun.id,
+    });
+    expect(compareRef.status).toBe(200);
+    expect(await compareRef.json()).toMatchObject({ status: "passed" });
+
+    const linkRef = await postJson(api, "/langsmith/links", {
+      projectId: project.id,
+      subjectType: "eval_run",
+      subjectId: runPayload.evalRun.id,
+      runId: "langsmith-run-1",
+    });
+    expect(linkRef.status).toBe(201);
+    const linksRef = await api.fetch(new Request(`http://localhost/langsmith/links?projectId=${project.id}`));
+    expect(await linksRef.json()).toHaveLength(1);
+  });
+});
+
 describe("execution API", () => {
   let prisma: PrismaClient;
   let tempDir: string;
@@ -758,7 +892,7 @@ describe("execution API", () => {
     expect(patchRef.status).toBe(404);
   }, 20000);
 
-  test("returns a strict 422 payload when approved items are not command-backed", async () => {
+  test("dispatches approved visual items without commands to visual verification", async () => {
     const api = createApp({
       prisma,
       env: {
@@ -786,18 +920,20 @@ describe("execution API", () => {
     const execution = await executeRef.json();
 
     const runTestsRef = await postJson(api, `/executions/${execution.id}/test-runs`, {});
+    expect(runTestsRef.status).toBe(200);
 
-    expect(runTestsRef.status).toBe(422);
-    await expect(runTestsRef.json()).resolves.toMatchObject({
-      code: "UNSUPPORTED_VERIFICATION_ITEMS",
-      message: "This execution contains approved verification items that cannot be run by the command runner.",
-      items: [
-        {
-          kind: "visual",
-          title: "visual review item",
-        },
-      ],
+    const visualResultsRef = await api.fetch(new Request(`http://localhost/executions/${execution.id}/visual-results`));
+    expect(visualResultsRef.status).toBe(200);
+    await expect(visualResultsRef.json()).resolves.toMatchObject([
+      {
+        status: "blocked",
+        mode: "screenshot",
+      },
+    ]);
+    const storedExecution = await prisma.taskExecution.findUnique({
+      where: { id: execution.id },
     });
+    expect(storedExecution?.status).toBe("failed");
   });
 
   test("returns a strict 422 payload when there are zero approved verification items", async () => {
@@ -869,6 +1005,11 @@ async function seedExecutableTask(
     baseBranch: "main",
   });
   const project = await projectRef.json();
+
+  const mcpSetupRef = await postJson(api, `/mcp/setup?projectId=${project.id}`, {
+    activate: true,
+  });
+  expect(mcpSetupRef.status).toBe(201);
 
   const setupRef = await postJson(api, "/model-setup", {
     projectId: project.id,

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "slack": {
+      "type": "http",
+      "url": "https://[TODO: slack-mcp-endpoint]",
+      "note": "Example only. Do not activate until you have a verified Slack MCP server, authentication flow, and `.claude/agent-memory/project-manager/slack-config.md`."
+    }
+  }
+}

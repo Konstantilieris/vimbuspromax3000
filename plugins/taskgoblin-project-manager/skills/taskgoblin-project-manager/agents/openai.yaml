@@ -1,0 +1,7 @@
+interface:
+  display_name: "TaskGoblin Project Manager"
+  short_description: "Operator-side PM routing for TaskGoblin"
+  default_prompt: "Use $taskgoblin-project-manager to plan a TaskGoblin change and prepare a Jira dry-run."
+
+policy:
+  allow_implicit_invocation: true

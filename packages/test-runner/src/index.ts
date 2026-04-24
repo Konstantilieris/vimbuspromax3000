@@ -10,13 +10,13 @@ import {
   getLatestPatchReview,
   getTaskExecutionDetail,
   listTestRuns,
+  persistVisualVerificationResult,
   setTaskStatus,
   updatePatchReview,
   updateTaskBranch,
   updateTaskExecution,
   updateTestRun,
 } from "@vimbuspromax3000/db";
-import { isVerificationItemRunnableNow } from "@vimbuspromax3000/shared";
 
 export type TestRunnerEligibilityErrorCode =
   | "NO_APPROVED_VERIFICATION_ITEMS"
@@ -72,6 +72,7 @@ type CommandRunnerResult = {
 };
 
 type ExecutionVerificationContext = NonNullable<Awaited<ReturnType<typeof getExecutionVerificationRunContext>>>;
+type VerificationRunItem = NonNullable<ExecutionVerificationContext["latestApprovedVerificationPlan"]>["items"][number];
 
 export function createTestRunnerService(options: {
   prisma: PrismaClient;
@@ -117,7 +118,7 @@ export function createTestRunnerService(options: {
       }
 
       const unsupportedItems = items
-        .filter((item) => !isVerificationItemRunnableNow(item.command))
+        .filter((item) => !hasExecutableCommand(item.command) && !isVisualVerificationDispatchItem(item))
         .map((item) => ({
           id: item.id,
           kind: item.kind,
@@ -145,7 +146,22 @@ export function createTestRunnerService(options: {
       let hasFailure = false;
 
       for (const item of items) {
-        const command = item.command!.trim();
+        if (!hasExecutableCommand(item.command)) {
+          const result = await runVisualVerificationItem({
+            prisma,
+            execution,
+            project,
+            item,
+          });
+
+          if (result.status !== "passed") {
+            hasFailure = true;
+          }
+
+          continue;
+        }
+
+        const command = item.command?.trim() ?? "";
         const startedAt = new Date();
         const testRun = await prisma.$transaction(async (tx) => {
           const created = await createTestRun(tx, {
@@ -342,6 +358,104 @@ export function createTestRunnerService(options: {
   };
 }
 
+async function runVisualVerificationItem(input: {
+  prisma: PrismaClient;
+  execution: ExecutionVerificationContext;
+  project: ExecutionVerificationContext["task"]["epic"]["project"];
+  item: VerificationRunItem;
+}) {
+  const startedAt = new Date();
+  const mode = resolveVisualVerificationMode(input.item);
+  const sourceAsset = await resolveVisualSourceAsset(
+    input.prisma,
+    input.project.id,
+    input.execution.task.id,
+    input.item,
+  );
+  const finishedAt = new Date();
+  const status = sourceAsset.usable ? "passed" : "blocked";
+  const itemStatus = status === "passed" ? "green" : "failed";
+  const summary = sourceAsset.usable
+    ? "Approved visual source-of-truth evidence is available."
+    : sourceAsset.reason;
+  const metadata = {
+    kind: input.item.kind,
+    title: input.item.title,
+    expectedAssetId: input.item.expectedAssetId,
+    sourceAsset: sourceAsset.asset
+      ? {
+          id: sourceAsset.asset.id,
+          relativePath: sourceAsset.asset.relativePath,
+          status: sourceAsset.asset.status,
+          sha256: sourceAsset.asset.sha256,
+          mimeType: sourceAsset.asset.mimeType,
+        }
+      : null,
+  };
+
+  await input.prisma.$transaction(async (tx) => {
+    await tx.verificationItem.update({
+      where: { id: input.item.id },
+      data: {
+        status: "running",
+      },
+    });
+
+    await appendLoopEvent(tx, {
+      projectId: input.project.id,
+      taskExecutionId: input.execution.id,
+      type: "visual.started",
+      payload: {
+        taskId: input.execution.task.id,
+        verificationItemId: input.item.id,
+        mode,
+        sourceAssetId: sourceAsset.asset?.id ?? null,
+        expectedAssetId: input.item.expectedAssetId ?? null,
+      },
+    });
+
+    const result = await persistVisualVerificationResult(tx, {
+      taskExecutionId: input.execution.id,
+      verificationItemId: input.item.id,
+      sourceAssetId: sourceAsset.asset?.id ?? null,
+      mode,
+      status,
+      summary,
+      sha256: sourceAsset.asset?.sha256 ?? null,
+      metadata,
+      startedAt,
+      finishedAt,
+    });
+
+    await tx.verificationItem.update({
+      where: { id: input.item.id },
+      data: {
+        status: itemStatus,
+      },
+    });
+
+    await appendLoopEvent(tx, {
+      projectId: input.project.id,
+      taskExecutionId: input.execution.id,
+      type: "visual.finished",
+      payload: {
+        taskId: input.execution.task.id,
+        verificationItemId: input.item.id,
+        visualVerificationResultId: result.id,
+        mode,
+        status,
+        sourceAssetId: sourceAsset.asset?.id ?? null,
+        expectedAssetId: input.item.expectedAssetId ?? null,
+        summary,
+      },
+    });
+  });
+
+  return {
+    status,
+  };
+}
+
 function runCapturedCommand(input: CommandRunnerInput): CommandRunnerResult {
   const artifactDirectory = buildTestRunArtifactDirectory(input);
 
@@ -409,6 +523,147 @@ async function requireExecutionVerificationContext(prisma: PrismaClient, executi
   }
 
   return execution;
+}
+
+function hasExecutableCommand(command: string | null | undefined) {
+  return typeof command === "string" && command.trim().length > 0;
+}
+
+function isVisualVerificationDispatchItem(item: VerificationRunItem) {
+  const kind = normalizeVisualToken(item.kind);
+  const mode = normalizeVisualToken(resolveVisualVerificationMode(item));
+
+  return (
+    ["visual", "pdf", "manual-evidence", "manual_evidence", "evidence"].includes(kind) ||
+    ["screenshot", "pixel-diff", "layout-check", "pdf-render", "manual-evidence", "asset-presence"].includes(mode)
+  );
+}
+
+function resolveVisualVerificationMode(item: VerificationRunItem) {
+  const config = parseJsonObject(item.configJson);
+  const configuredMode =
+    stringFromUnknown(config.comparisonMode) ??
+    stringFromUnknown(config.mode) ??
+    stringFromUnknown(config.visualMode);
+
+  if (configuredMode) {
+    return configuredMode;
+  }
+
+  const kind = normalizeVisualToken(item.kind);
+
+  if (kind === "pdf") {
+    return "pdf-render";
+  }
+  if (kind === "manual-evidence" || kind === "manual_evidence" || kind === "evidence") {
+    return "manual-evidence";
+  }
+
+  return "asset-presence";
+}
+
+async function resolveVisualSourceAsset(
+  prisma: PrismaClient,
+  projectId: string,
+  taskId: string,
+  item: VerificationRunItem,
+) {
+  if (item.expectedAssetId) {
+    const expectedAsset = await prisma.sourceOfTruthAsset.findFirst({
+      where: {
+        id: item.expectedAssetId,
+        projectId,
+      },
+    });
+
+    if (!expectedAsset) {
+      return {
+        usable: false,
+        reason: `Expected source asset ${item.expectedAssetId} was not found in this project.`,
+        asset: null,
+      };
+    }
+
+    if (expectedAsset.status !== "approved") {
+      return {
+        usable: false,
+        reason: `Expected source asset ${expectedAsset.relativePath} requires approval before visual verification can pass.`,
+        asset: expectedAsset,
+      };
+    }
+
+    return {
+      usable: true,
+      reason: "Approved expected source asset is available.",
+      asset: expectedAsset,
+    };
+  }
+
+  const linkedAsset = await prisma.sourceOfTruthAsset.findFirst({
+    where: {
+      projectId,
+      verificationItemId: item.id,
+      status: "approved",
+    },
+    orderBy: [{ createdAt: "asc" }],
+  });
+
+  if (linkedAsset) {
+    return {
+      usable: true,
+      reason: "Approved item-linked source asset is available.",
+      asset: linkedAsset,
+    };
+  }
+
+  const taskAsset = await prisma.sourceOfTruthAsset.findFirst({
+    where: {
+      projectId,
+      taskId,
+      status: "approved",
+    },
+    orderBy: [{ createdAt: "asc" }],
+  });
+
+  if (taskAsset) {
+    return {
+      usable: true,
+      reason: "Approved task source asset is available.",
+      asset: taskAsset,
+    };
+  }
+
+  return {
+    usable: false,
+    reason: "No approved source-of-truth or evidence asset is linked to this verification item.",
+    asset: null,
+  };
+}
+
+function parseJsonObject(value: string | null | undefined) {
+  if (!value) {
+    return {};
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(value);
+
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return {};
+  }
+
+  return {};
+}
+
+function stringFromUnknown(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function normalizeVisualToken(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase();
 }
 
 function buildTestRunArtifactDirectory(input: CommandRunnerInput) {

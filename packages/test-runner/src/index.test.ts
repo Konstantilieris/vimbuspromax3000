@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PrismaClient } from "@vimbuspromax3000/db/client";
@@ -6,8 +7,12 @@ import {
   createApprovalDecision,
   createPlannerRun,
   createProject,
+  approveSourceAsset,
+  createSourceAsset,
   listTasks,
+  listVisualVerificationResults,
   persistPlannerProposal,
+  updateVerificationItemExpectedAsset,
 } from "@vimbuspromax3000/db";
 import {
   createIsolatedPrisma,
@@ -17,7 +22,7 @@ import {
 } from "@vimbuspromax3000/db/testing";
 import { setupModelRegistry } from "@vimbuspromax3000/model-registry";
 import { createExecutionService } from "@vimbuspromax3000/agent";
-import { createTestRunnerService, TestRunnerEligibilityError } from "./index";
+import { createTestRunnerService } from "./index";
 
 describe("test runner service", () => {
   let prisma: PrismaClient;
@@ -143,46 +148,57 @@ describe("test runner service", () => {
     expect(patchReview?.diffPath && existsSync(patchReview.diffPath)).toBe(true);
   }, 20000);
 
-  test("rejects approved visual items without a command with a structured unsupported-items error", async () => {
+  test.each([
+    { kind: "visual", assetKind: "image", mode: "asset-presence" },
+    { kind: "pdf", assetKind: "pdf", mode: "pdf-render" },
+    { kind: "manual-evidence", assetKind: "manual_evidence", mode: "manual-evidence" },
+    { kind: "evidence", assetKind: "manual_evidence", mode: "manual-evidence" },
+  ])("handles approved $kind items without a command through visual verification", async ({ kind, assetKind, mode }) => {
     const env = {
       VIMBUS_TEST_KEY: "present",
     };
     const { project, task } = await seedReadyTask(prisma, tempDir, {
       items: [
         {
-          kind: "visual",
-          runner: "playwright",
-          title: "login screen visual check",
-          description: "captures a login screen comparison",
+          kind,
+          runner: "custom",
+          title: `${kind} source check`,
+          description: "uses approved source-of-truth evidence",
           command: null,
         },
       ],
     });
+    const item = await getOnlyVerificationItem(prisma, task.id);
+    await attachApprovedSourceAsset(prisma, {
+      projectId: project.id,
+      taskId: task.id,
+      verificationItemId: item.id,
+      kind: assetKind,
+      relativePath: `docs/assets/${kind}.png`,
+      mimeType: assetKind === "pdf" ? "application/pdf" : "image/png",
+    });
     const { execution, testRunnerService } = await startExecutionForTask(prisma, project.id, task.id, env);
 
-    await expect(
-      testRunnerService.runExecutionVerification({
-        executionId: execution.id,
-      }),
-    ).rejects.toMatchObject({
-      code: "UNSUPPORTED_VERIFICATION_ITEMS",
-      message: "This execution contains approved verification items that cannot be run by the command runner.",
-      items: [
-        {
-          kind: "visual",
-          title: "login screen visual check",
-        },
-      ],
+    const testRuns = await testRunnerService.runExecutionVerification({
+      executionId: execution.id,
+    });
+    const visualResults = await listVisualVerificationResults(prisma, {
+      taskExecutionId: execution.id,
+    });
+    const storedItems = await prisma.verificationItem.findMany({
+      where: {
+        taskId: task.id,
+      },
     });
 
-    await expect(
-      testRunnerService.runExecutionVerification({
-        executionId: execution.id,
-      }),
-    ).rejects.toBeInstanceOf(TestRunnerEligibilityError);
+    expect(testRuns).toHaveLength(0);
+    expect(visualResults).toHaveLength(1);
+    expect(visualResults[0]?.mode).toBe(mode);
+    expect(visualResults[0]?.status).toBe("passed");
+    expect(storedItems.map((storedItem) => storedItem.status)).toEqual(["green"]);
   });
 
-  test("rejects approved evidence items without a command with a structured unsupported-items error", async () => {
+  test("blocks approved evidence items without approved source assets instead of rejecting them as unsupported", async () => {
     const env = {
       VIMBUS_TEST_KEY: "present",
     };
@@ -198,26 +214,28 @@ describe("test runner service", () => {
     });
     const { execution, testRunnerService } = await startExecutionForTask(prisma, project.id, task.id, env);
 
-    await expect(
-      testRunnerService.runExecutionVerification({
-        executionId: execution.id,
-      }),
-    ).rejects.toMatchObject({
-      code: "UNSUPPORTED_VERIFICATION_ITEMS",
-      message: "This execution contains approved verification items that cannot be run by the command runner.",
-      items: [
-        {
-          kind: "evidence",
-          title: "operator evidence capture",
-        },
-      ],
+    const testRuns = await testRunnerService.runExecutionVerification({
+      executionId: execution.id,
     });
+    const visualResults = await listVisualVerificationResults(prisma, {
+      taskExecutionId: execution.id,
+    });
+    const updatedExecution = await prisma.taskExecution.findUnique({
+      where: { id: execution.id },
+    });
+
+    expect(testRuns).toHaveLength(0);
+    expect(visualResults).toHaveLength(1);
+    expect(visualResults[0]?.mode).toBe("manual-evidence");
+    expect(visualResults[0]?.status).toBe("blocked");
+    expect(updatedExecution?.status).toBe("failed");
   });
 
-  test("rejects the whole run when approved command-backed and non-command approved items are mixed", async () => {
+  test("runs command-backed items and non-command visual items in one verification pass", async () => {
     const env = {
       VIMBUS_TEST_KEY: "present",
     };
+    const seenCommands: string[] = [];
     const { project, task } = await seedReadyTask(prisma, tempDir, {
       items: [
         {
@@ -229,35 +247,36 @@ describe("test runner service", () => {
         {
           kind: "visual",
           runner: "playwright",
-          title: "unsupported visual verification",
-          description: "cannot run through the command runner yet",
+          title: "source asset verification",
+          description: "uses an approved visual source asset",
           command: null,
         },
       ],
     });
-    const { execution, testRunnerService } = await startExecutionForTask(prisma, project.id, task.id, env);
-
-    await expect(
-      testRunnerService.runExecutionVerification({
-        executionId: execution.id,
-      }),
-    ).rejects.toMatchObject({
-      code: "UNSUPPORTED_VERIFICATION_ITEMS",
-      items: [
-        {
-          kind: "visual",
-          title: "unsupported visual verification",
-        },
-      ],
+    const visualItem = await prisma.verificationItem.findFirstOrThrow({
+      where: {
+        taskId: task.id,
+        kind: "visual",
+      },
+    });
+    await attachApprovedSourceAsset(prisma, {
+      projectId: project.id,
+      taskId: task.id,
+      verificationItemId: visualItem.id,
+      kind: "image",
+      relativePath: "docs/assets/source-check.png",
+      mimeType: "image/png",
+    });
+    const { execution, testRunnerService } = await startExecutionForTask(prisma, project.id, task.id, env, {
+      commandRunner: createStubCommandRunner(tempDir, seenCommands),
     });
 
-    expect(
-      await prisma.testRun.count({
-        where: {
-          taskExecutionId: execution.id,
-        },
-      }),
-    ).toBe(0);
+    const testRuns = await testRunnerService.runExecutionVerification({
+      executionId: execution.id,
+    });
+    const visualResults = await listVisualVerificationResults(prisma, {
+      taskExecutionId: execution.id,
+    });
 
     const storedItems = await prisma.verificationItem.findMany({
       where: {
@@ -265,7 +284,12 @@ describe("test runner service", () => {
       },
       orderBy: [{ orderIndex: "asc" }],
     });
-    expect(storedItems.map((item) => item.status)).toEqual(["approved", "approved"]);
+
+    expect(seenCommands).toEqual(["echo allowed"]);
+    expect(testRuns).toHaveLength(1);
+    expect(visualResults).toHaveLength(1);
+    expect(visualResults[0]?.status).toBe("passed");
+    expect(storedItems.map((item) => item.status)).toEqual(["green", "green"]);
   });
 
   test("rejects when the latest approved plan has zero approved verification items", async () => {
@@ -520,6 +544,54 @@ async function startExecutionForTask(
     execution,
     testRunnerService,
   };
+}
+
+async function getOnlyVerificationItem(prisma: PrismaClient, taskId: string) {
+  const item = await prisma.verificationItem.findFirst({
+    where: {
+      taskId,
+    },
+    orderBy: [{ orderIndex: "asc" }],
+  });
+
+  if (!item) {
+    throw new Error("Expected verification item to exist.");
+  }
+
+  return item;
+}
+
+async function attachApprovedSourceAsset(
+  prisma: PrismaClient,
+  input: {
+    projectId: string;
+    taskId: string;
+    verificationItemId: string;
+    kind: string;
+    relativePath: string;
+    mimeType: string;
+  },
+) {
+  const asset = await createSourceAsset(prisma, {
+    projectId: input.projectId,
+    taskId: input.taskId,
+    verificationItemId: input.verificationItemId,
+    kind: input.kind,
+    relativePath: input.relativePath,
+    mimeType: input.mimeType,
+    sha256: randomUUID().replace(/-/g, "").padEnd(64, "0"),
+    metadataJson: JSON.stringify({
+      testFixture: true,
+    }),
+  });
+  const approvedAsset = await approveSourceAsset(prisma, asset.id);
+
+  await updateVerificationItemExpectedAsset(prisma, {
+    verificationItemId: input.verificationItemId,
+    expectedAssetId: approvedAsset.id,
+  });
+
+  return approvedAsset;
 }
 
 function createStubCommandRunner(rootPath: string, seenCommands: string[]) {

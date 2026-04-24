@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@opentui/core": "0.1.102",
+    "@vimbuspromax3000/mcp-client": "workspace:*",
     "@vimbuspromax3000/shared": "workspace:*"
   }
 }

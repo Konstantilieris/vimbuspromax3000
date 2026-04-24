@@ -13,20 +13,32 @@ export default defineConfig({
         replacement: fileURLToPath(new URL("./packages/db/src/client.ts", import.meta.url)),
       },
       {
+        find: "@vimbuspromax3000/db/repositories",
+        replacement: fileURLToPath(new URL("./packages/db/src/repositories/index.ts", import.meta.url)),
+      },
+      {
         find: "@vimbuspromax3000/agent",
         replacement: fileURLToPath(new URL("./packages/agent/src/index.ts", import.meta.url)),
       },
       {
-        find: "@vimbuspromax3000/mcp-client",
-        replacement: fileURLToPath(new URL("./packages/mcp-client/src/index.ts", import.meta.url)),
+        find: "@vimbuspromax3000/benchmarks",
+        replacement: fileURLToPath(new URL("./packages/benchmarks/src/index.ts", import.meta.url)),
       },
       {
         find: "@vimbuspromax3000/db",
         replacement: fileURLToPath(new URL("./packages/db/src/index.ts", import.meta.url)),
       },
       {
+        find: "@vimbuspromax3000/mcp-client",
+        replacement: fileURLToPath(new URL("./packages/mcp-client/src/index.ts", import.meta.url)),
+      },
+      {
         find: "@vimbuspromax3000/model-registry",
         replacement: fileURLToPath(new URL("./packages/model-registry/src/index.ts", import.meta.url)),
+      },
+      {
+        find: "@vimbuspromax3000/observability",
+        replacement: fileURLToPath(new URL("./packages/observability/src/index.ts", import.meta.url)),
       },
       {
         find: "@vimbuspromax3000/planner",
@@ -43,6 +55,10 @@ export default defineConfig({
       {
         find: "@vimbuspromax3000/test-runner",
         replacement: fileURLToPath(new URL("./packages/test-runner/src/index.ts", import.meta.url)),
+      },
+      {
+        find: "@vimbuspromax3000/verification",
+        replacement: fileURLToPath(new URL("./packages/verification/src/index.ts", import.meta.url)),
       },
     ],
   },

@@ -1,13 +1,25 @@
 import { getDashboardSnapshot } from "./dashboard";
 import { isExecutionCommand, runExecutionCommand } from "./execution";
+import { isMcpCommand, runMcpCommand } from "./mcp";
 import { isModelsCommand, runModelsCommand } from "./models";
 import { isPlannerCommand, runPlannerCommand } from "./planner";
 
 const args = process.argv.slice(2);
 const isSmokeMode = args.includes("--smoke") || process.env.CI === "true" || !process.stdout.isTTY;
+const isMcpMode = args.some(isMcpCommand);
 const isModelsMode = args.some(isModelsCommand);
 const isPlannerMode = args.some(isPlannerCommand);
 const isExecutionMode = args.some(isExecutionCommand);
+
+if (isMcpMode) {
+  try {
+    console.log(await runMcpCommand(args));
+    process.exit(0);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
 
 if (isModelsMode) {
   try {

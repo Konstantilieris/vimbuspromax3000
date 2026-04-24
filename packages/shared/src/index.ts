@@ -164,6 +164,7 @@ export const APPROVAL_SUBJECT_TYPES = [
   "task",
   "verification_plan",
   "verification_item_skip",
+  "source_of_truth_asset",
   "mutating_tool_call",
   "patch_review",
   "branch_abandon_reset",
@@ -189,6 +190,37 @@ export const EVALUATION_STATUSES = [
 ] as const;
 export type EvaluationStatus = (typeof EVALUATION_STATUSES)[number];
 export const isEvaluationStatus = createEnumGuard(EVALUATION_STATUSES);
+
+export const EVALUATION_DIMENSIONS = [
+  "planner_quality",
+  "task_decomposition",
+  "verification_quality",
+  "execution_quality",
+  "outcome_correctness",
+  "tool_usage_quality",
+  "security_policy_compliance",
+  "regression_risk",
+] as const;
+export type EvaluationDimension = (typeof EVALUATION_DIMENSIONS)[number];
+export const isEvaluationDimension = createEnumGuard(EVALUATION_DIMENSIONS);
+
+export const EVALUATION_VERDICTS = [
+  "passed",
+  "warned",
+  "failed",
+  "blocked",
+] as const;
+export type EvaluationVerdict = (typeof EVALUATION_VERDICTS)[number];
+export const isEvaluationVerdict = createEnumGuard(EVALUATION_VERDICTS);
+
+export const EVALUATOR_TYPES = [
+  "rule",
+  "llm",
+  "openevals",
+  "human",
+] as const;
+export type EvaluatorType = (typeof EVALUATOR_TYPES)[number];
+export const isEvaluatorType = createEnumGuard(EVALUATOR_TYPES);
 
 export const MCP_TOOL_CALL_STATUSES = [
   "requested",
@@ -265,6 +297,7 @@ export const isModelSecretStorageType = createEnumGuard(MODEL_SECRET_STORAGE_TYP
 
 export const MODEL_SECRET_REF_KINDS = [
   "provider_api_key",
+  "mcp_server_env",
 ] as const;
 export type ModelSecretRefKind = (typeof MODEL_SECRET_REF_KINDS)[number];
 export const isModelSecretRefKind = createEnumGuard(MODEL_SECRET_REF_KINDS);
@@ -364,6 +397,14 @@ export const MODEL_DECISION_STATES = [
 export type ModelDecisionState = (typeof MODEL_DECISION_STATES)[number];
 export const isModelDecisionState = createEnumGuard(MODEL_DECISION_STATES);
 
+export const BENCHMARK_SCENARIO_STATUSES = [
+  "active",
+  "disabled",
+  "archived",
+] as const;
+export type BenchmarkScenarioStatus = (typeof BENCHMARK_SCENARIO_STATUSES)[number];
+export const isBenchmarkScenarioStatus = createEnumGuard(BENCHMARK_SCENARIO_STATUSES);
+
 export const REGRESSION_STATUSES = [
   "baseline",
   "compared",
@@ -372,6 +413,113 @@ export const REGRESSION_STATUSES = [
 ] as const;
 export type RegressionStatus = (typeof REGRESSION_STATUSES)[number];
 export const isRegressionStatus = createEnumGuard(REGRESSION_STATUSES);
+
+export const MCP_SERVER_TRANSPORTS = [
+  "stdio",
+  "http",
+] as const;
+export type McpServerTransport = (typeof MCP_SERVER_TRANSPORTS)[number];
+export const isMcpServerTransport = createEnumGuard(MCP_SERVER_TRANSPORTS);
+
+export const MCP_SERVER_TRUST_LEVELS = [
+  "trusted",
+  "restricted",
+  "untrusted",
+] as const;
+export type McpServerTrustLevel = (typeof MCP_SERVER_TRUST_LEVELS)[number];
+export const isMcpServerTrustLevel = createEnumGuard(MCP_SERVER_TRUST_LEVELS);
+
+export const MCP_SERVER_STATUSES = [
+  "pending",
+  "active",
+  "disabled",
+  "error",
+] as const;
+export type McpServerStatus = (typeof MCP_SERVER_STATUSES)[number];
+export const isMcpServerStatus = createEnumGuard(MCP_SERVER_STATUSES);
+
+export const MCP_SERVER_AUTH_TYPES = [
+  "none",
+  "env_passthrough",
+] as const;
+export type McpServerAuthType = (typeof MCP_SERVER_AUTH_TYPES)[number];
+export const isMcpServerAuthType = createEnumGuard(MCP_SERVER_AUTH_TYPES);
+
+export const MCP_TOOL_MUTABILITIES = [
+  "read",
+  "write",
+  "execute",
+] as const;
+export type McpToolMutability = (typeof MCP_TOOL_MUTABILITIES)[number];
+export const isMcpToolMutability = createEnumGuard(MCP_TOOL_MUTABILITIES);
+
+export const MCP_TOOL_STATUSES = [
+  "active",
+  "disabled",
+] as const;
+export type McpToolStatus = (typeof MCP_TOOL_STATUSES)[number];
+export const isMcpToolStatus = createEnumGuard(MCP_TOOL_STATUSES);
+
+export const SOURCE_ASSET_KINDS = [
+  "image",
+  "pdf",
+  "screenshot",
+  "manual_evidence",
+] as const;
+export type SourceAssetKind = (typeof SOURCE_ASSET_KINDS)[number];
+export const isSourceAssetKind = createEnumGuard(SOURCE_ASSET_KINDS);
+
+export const SOURCE_ASSET_STATUSES = [
+  "proposed",
+  "approved",
+  "rejected",
+  "superseded",
+] as const;
+export type SourceAssetStatus = (typeof SOURCE_ASSET_STATUSES)[number];
+export const isSourceAssetStatus = createEnumGuard(SOURCE_ASSET_STATUSES);
+
+export const VISUAL_COMPARISON_MODES = [
+  "screenshot",
+  "pixel-diff",
+  "layout-check",
+  "pdf-render",
+  "manual-evidence",
+] as const;
+export type VisualComparisonMode = (typeof VISUAL_COMPARISON_MODES)[number];
+export const isVisualComparisonMode = createEnumGuard(VISUAL_COMPARISON_MODES);
+
+export const VISUAL_VERIFICATION_RESULT_STATUSES = [
+  "running",
+  "passed",
+  "failed",
+  "blocked",
+] as const;
+export type VisualVerificationResultStatus = (typeof VISUAL_VERIFICATION_RESULT_STATUSES)[number];
+export const isVisualVerificationResultStatus = createEnumGuard(VISUAL_VERIFICATION_RESULT_STATUSES);
+
+export const LANGSMITH_SYNC_STATUSES = [
+  "pending",
+  "synced",
+  "failed",
+  "disabled",
+  "linked",
+  "exported",
+] as const;
+export type LangSmithSyncStatus = (typeof LANGSMITH_SYNC_STATUSES)[number];
+export const isLangSmithSyncStatus = createEnumGuard(LANGSMITH_SYNC_STATUSES);
+
+export const LANGSMITH_SUBJECT_TYPES = [
+  "planner_run",
+  "agent_step",
+  "task_execution",
+  "test_run",
+  "eval_run",
+  "benchmark_scenario",
+  "regression_baseline",
+  "mcp_tool_call",
+] as const;
+export type LangSmithSubjectType = (typeof LANGSMITH_SUBJECT_TYPES)[number];
+export const isLangSmithSubjectType = createEnumGuard(LANGSMITH_SUBJECT_TYPES);
 
 export const LOOP_EVENT_TYPES = [
   "planner.started",
@@ -391,6 +539,8 @@ export const LOOP_EVENT_TYPES = [
   "mcp.tool.requested",
   "mcp.tool.blocked",
   "mcp.tool.completed",
+  "mcp.server.verified",
+  "mcp.server.failed",
   "model.resolution.requested",
   "model.resolution.succeeded",
   "model.resolution.failed",
@@ -401,6 +551,10 @@ export const LOOP_EVENT_TYPES = [
   "test.stdout",
   "test.stderr",
   "test.finished",
+  "asset.ingested",
+  "asset.approved",
+  "visual.started",
+  "visual.finished",
   "evaluation.started",
   "evaluation.result",
   "evaluation.finished",

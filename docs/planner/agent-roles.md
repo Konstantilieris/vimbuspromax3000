@@ -56,3 +56,20 @@ Default model slot: `verification_designer`.
 Performs final consistency review before approval. It checks that tasks, verification plans, assets, branch policy, and operator gates are complete.
 
 Default model slot: `reviewer`.
+
+## Operator-Side PM Pack
+
+TaskGoblin also carries a repo-local PM/Jira companion pack under `.claude/agents`.
+
+This pack is documented in [project-manager-pack.md](project-manager-pack.md) and includes:
+
+- `project-manager`
+- `pm-codebase-analyst`
+- `pm-work-breakdown`
+- `pm-sprint-planner`
+- `pm-roadmap-planner`
+- `pm-jira-operator`
+
+These are operator-side planning agents for discovery, breakdowns, sprint and roadmap planning, and Jira workflows around this repo.
+
+They do not replace the DB-backed planner roles above, they do not change `packages/planner`, and they are not part of the runtime execution loop.

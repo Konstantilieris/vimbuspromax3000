@@ -11,7 +11,7 @@ import {
   updateMcpToolCall,
   upsertMcpServer,
   upsertMcpTool,
-} from "@vimbuspromax3000/db";
+} from "@vimbuspromax3000/db/repositories";
 import { STANDARD_MCP_SERVERS } from "./definitions";
 import { hashArgs, normalizeArgs } from "./args";
 import { McpValidationError, validateToolArguments } from "./validation";

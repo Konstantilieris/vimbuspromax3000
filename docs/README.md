@@ -10,14 +10,15 @@ Core loop: `Planner -> Verification Contract -> Approval -> Execution -> Verifie
 2. `product/principles.md` - operating rules that every subsystem must preserve.
 3. `architecture/system-overview.md` - CLI, API, planner, policy, MCP, verification, evaluation, and observability.
 4. `planner/planner-pipeline.md` - planner flow based on the existing Dilos planner skill, upgraded to DB-backed records.
-5. `verification/verification-contract.md` - first-class verification model for logic, visual, static, and evidence checks.
-6. `evaluation/evaluation-contract.md` - evaluation gate after verification and before patch review.
-7. `architecture/mcp.md` - MCP-standardized tool layer.
-8. `policy/model-selection.md` - adaptive model routing and retry escalation.
-9. `data/prisma-schema-proposal.md` - proposed Prisma SQLite schema.
-10. `benchmarks/regression-system.md` - benchmark baselines and regression gates.
-11. `observability/langsmith.md` - optional LangSmith traces, datasets, and experiments.
-12. `execution/mvp-plan.md` - canonical MVP tracker, current status, finish line, and next implementation sequence.
+5. `planner/project-manager-pack.md` - repo-local operator PM/Jira companion pack under `.claude/agents` plus native Codex mirror packaging.
+6. `verification/verification-contract.md` - first-class verification model for logic, visual, static, and evidence checks.
+7. `evaluation/evaluation-contract.md` - evaluation gate after verification and before patch review.
+8. `architecture/mcp.md` - MCP-standardized tool layer.
+9. `policy/model-selection.md` - adaptive model routing and retry escalation.
+10. `data/prisma-schema-proposal.md` - proposed Prisma SQLite schema.
+11. `benchmarks/regression-system.md` - benchmark baselines and regression gates.
+12. `observability/langsmith.md` - optional LangSmith traces, datasets, and experiments.
+13. `execution/mvp-plan.md` - canonical MVP tracker, current status, finish line, and next implementation sequence.
 
 ## Canonical Model
 
@@ -31,7 +32,7 @@ Markdown docs are bootstrap/design artifacts and later generated review views. V
 |---|---|
 | Product | `product/prd.md`, `product/principles.md` |
 | Architecture | `architecture/system-overview.md`, `architecture/module-map.md`, `architecture/event-system.md`, `architecture/branch-policy.md`, `architecture/mcp.md`, `architecture/mcp-security.md` |
-| Planner | `planner/planner-pipeline.md`, `planner/agent-roles.md`, `planner/interview-workflow.md` |
+| Planner | `planner/planner-pipeline.md`, `planner/agent-roles.md`, `planner/interview-workflow.md`, `planner/project-manager-pack.md` |
 | Verification | `verification/verification-contract.md`, `verification/tdd-execution-loop.md`, `verification/visual-source-of-truth.md` |
 | Evaluation | `evaluation/evaluation-contract.md`, `evaluation/eval-dimensions.md`, `evaluation/scoring.md`, `evaluation/openevals.md` |
 | Policy | `policy/model-selection.md` |

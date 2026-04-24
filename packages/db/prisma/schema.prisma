@@ -25,6 +25,7 @@ model Project {
   modelProviders ModelProvider[]
   modelSlots     ProjectModelSlot[]
   secretRefs     ProjectSecretRef[]
+  mcpServers     McpServer[]
 }
 
 model PlannerRun {
@@ -131,6 +132,9 @@ model VerificationItem {
 
   plan     VerificationPlan @relation(fields: [planId], references: [id])
   testRuns TestRun[]
+  expectedAsset SourceOfTruthAsset? @relation("ExpectedVerificationAsset", fields: [expectedAssetId], references: [id])
+  assets SourceOfTruthAsset[] @relation("VerificationItemAssets")
+  visualResults VisualVerificationResult[]
 
   @@index([planId, kind])
   @@index([taskId, status])
@@ -149,14 +153,51 @@ model SourceOfTruthAsset {
   height             Int?
   pageCount          Int?
   metadataJson       String?
+  status             String   @default("proposed")
+  comparisonMode     String?
+  approvedAt         DateTime?
+  supersededByAssetId String?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
   project Project @relation(fields: [projectId], references: [id])
   task    Task?   @relation(fields: [taskId], references: [id])
+  verificationItem VerificationItem? @relation("VerificationItemAssets", fields: [verificationItemId], references: [id])
+  expectedByItems VerificationItem[] @relation("ExpectedVerificationAsset")
+  visualResults VisualVerificationResult[]
 
   @@unique([projectId, relativePath])
   @@index([taskId])
+  @@index([verificationItemId])
+  @@index([projectId, status])
+}
+
+model VisualVerificationResult {
+  id                 String    @id @default(cuid())
+  taskExecutionId    String
+  verificationItemId String
+  sourceAssetId      String?
+  mode               String
+  status             String
+  artifactDirectory  String?
+  actualPath         String?
+  diffPath           String?
+  reportPath         String?
+  sha256             String?
+  diffRatio          Float?
+  threshold          Float?
+  metadataJson       String?
+  startedAt          DateTime?
+  finishedAt         DateTime?
+  createdAt          DateTime  @default(now())
+
+  taskExecution    TaskExecution       @relation(fields: [taskExecutionId], references: [id])
+  verificationItem VerificationItem     @relation(fields: [verificationItemId], references: [id])
+  sourceAsset      SourceOfTruthAsset? @relation(fields: [sourceAssetId], references: [id])
+
+  @@index([taskExecutionId, status])
+  @@index([verificationItemId])
+  @@index([sourceAssetId])
 }
 
 model Approval {
@@ -206,6 +247,7 @@ model TaskExecution {
   testRuns     TestRun[]
   patchReviews PatchReview[]
   events       LoopEvent[]
+  visualResults VisualVerificationResult[]
 
   @@index([taskId, status])
 }
@@ -285,6 +327,7 @@ model ProjectSecretRef {
 
   project   Project         @relation(fields: [projectId], references: [id])
   providers ModelProvider[]
+  mcpServers McpServer[]
 
   @@unique([projectId, label])
   @@index([projectId, kind, status])
@@ -403,14 +446,21 @@ model McpServer {
   endpoint   String?
   trustLevel String
   status     String
+  authType   String   @default("none")
+  credentialRefId String?
+  lastVerifiedAt DateTime?
+  lastError  String?
   configJson String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
+  project Project @relation(fields: [projectId], references: [id])
+  credentialRef ProjectSecretRef? @relation(fields: [credentialRefId], references: [id])
   tools McpTool[]
 
   @@unique([projectId, name])
   @@index([projectId, status])
+  @@index([credentialRefId])
 }
 
 model McpTool {
