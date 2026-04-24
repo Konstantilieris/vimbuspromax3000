@@ -17,6 +17,7 @@ import {
   updateTaskBranch,
   updateTaskExecution,
 } from "@vimbuspromax3000/db";
+import { createMcpService } from "@vimbuspromax3000/mcp-client";
 import { resolveModelSlot } from "@vimbuspromax3000/policy-engine";
 
 export type ExecutionService = {
@@ -50,6 +51,7 @@ export function createExecutionService(options: {
 }): ExecutionService {
   const prisma = options.prisma;
   const env = options.env ?? process.env;
+  const mcpService = createMcpService({ prisma });
 
   return {
     async getTaskBranch(taskId) {
@@ -186,6 +188,7 @@ export function createExecutionService(options: {
       }
 
       const context = await requireReadyTaskContext(prisma, input.taskId);
+      await mcpService.ensureProjectMcpSetup(context.epic.projectId);
       const project = context.epic.project;
       const branch = preparedBranch;
       const startedAt = new Date();

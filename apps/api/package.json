@@ -10,6 +10,7 @@
   "dependencies": {
     "@vimbuspromax3000/agent": "workspace:*",
     "@vimbuspromax3000/db": "workspace:*",
+    "@vimbuspromax3000/mcp-client": "workspace:*",
     "@vimbuspromax3000/model-registry": "workspace:*",
     "@vimbuspromax3000/planner": "workspace:*",
     "@vimbuspromax3000/policy-engine": "workspace:*",
