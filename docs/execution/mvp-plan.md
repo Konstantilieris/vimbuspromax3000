@@ -42,6 +42,7 @@ Completed foundations:
   - strict command-only verification runner for approved items with sequential execution, 422 eligibility errors, and deterministic artifacts under `.artifacts/executions/<execution-id>/test-runs/...`
   - patch-review metadata routes backed by current git diff summary and approval/rejection state
   - isolated SQLite + git fixture tests for repositories, services, API integration, and happy-path execution
+  - HC-92 API smoke covers the local operator loop from project/planner setup through verification approval, branch preparation, execution, command-backed verification artifacts, patch metadata, and patch approval; adjacent API tests cover patch rejection, command failure, and unsupported approved verification items
 
 Immediate gap: MCP client and tool-call approval gates are next. Evaluation, visual verification, and non-command evidence execution remain deferred.
 

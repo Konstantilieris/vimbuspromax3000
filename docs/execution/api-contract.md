@@ -6,6 +6,26 @@ Core loop: `Planner -> Verification Contract -> Approval -> Execution -> Verifie
 
 The API is a local Hono service. In this slice the CLI talks to it over HTTP and reads loop events through a JSON endpoint. SSE is deferred to the later operator-console slice.
 
+## Local Execution-Loop Smoke
+
+The repeatable CI/developer smoke path is covered by `apps/api/src/app.test.ts` as the HC-92 local operator smoke. It runs only against an isolated SQLite database and a temporary local git repository.
+
+Expected happy-path sequence:
+
+1. `POST /projects` creates a project with a local git root and `main` base branch.
+2. `POST /model-setup` assigns `executor_default` to an env-backed active model.
+3. `POST /planner/runs`, `POST /planner/runs/:id/answers`, and payload-backed `POST /planner/runs/:id/generate` create one task with a command-backed verification item.
+4. `POST /approvals` grants planner approval, moving the task to `awaiting_verification_approval`.
+5. `GET /tasks/:id/verification` shows the plan as fully runnable by the command runner.
+6. `POST /tasks/:id/verification/approve` grants verification approval, moving the task to `ready`.
+7. `POST /tasks/:id/branch` prepares and switches to a deterministic task branch.
+8. `POST /tasks/:id/execute` starts execution, persists the model policy snapshot, model decision, agent step, and active branch state.
+9. `POST /executions/:id/test-runs` runs the approved shell command, persists `TestRun` records, stdout/stderr logs, and `meta.json` under `.artifacts/executions/<execution-id>/test-runs/...`.
+10. `GET /executions/:id/patch` exposes the ready patch review with a diff under `.taskgoblin/artifacts/executions/<execution-id>/patch/current.diff`.
+11. `POST /executions/:id/patch/approve` marks the patch approved, execution completed, task completed, and branch approved.
+
+Patch rejection is covered by the same API surface with `POST /executions/:id/patch/reject`, which marks the patch rejected and the execution/task failed. Representative verification failures are covered by command failure and unsupported approved-item tests: failed commands persist failed `TestRun` state and do not create patch review metadata, while approved non-command items return the strict `422` payload documented below before any command runs.
+
 ## Projects
 
 | Method | Path | Purpose |

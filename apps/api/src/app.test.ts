@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import app, { createApp, healthResponse } from "./app";
 import {
   createIsolatedPrisma,
@@ -408,6 +410,223 @@ describe("execution API", () => {
     removeTempDir(tempDir);
   });
 
+  test("runs the local operator smoke from approved task to patch approval with persisted artifacts", async () => {
+    const api = createApp({
+      prisma,
+      env: {
+        VIMBUS_TEST_KEY: "present",
+      },
+    });
+
+    const projectRef = await postJson(api, "/projects", {
+      name: "HC-92 Smoke Project",
+      rootPath: tempDir,
+      baseBranch: "main",
+    });
+    expect(projectRef.status).toBe(201);
+    const project = await projectRef.json();
+
+    const modelSetupRef = await postJson(api, "/model-setup", {
+      projectId: project.id,
+      providerKey: "openai",
+      providerKind: "openai",
+      providerStatus: "active",
+      secretEnv: "VIMBUS_TEST_KEY",
+      modelName: "GPT Smoke",
+      modelSlug: "gpt-smoke",
+      capabilities: ["json"],
+      slotKeys: ["executor_default"],
+    });
+    expect(modelSetupRef.status).toBe(201);
+
+    const plannerRunRef = await postJson(api, "/planner/runs", {
+      projectId: project.id,
+      goal: "Prove the local execution loop from task approval to patch review",
+      moduleName: "smoke",
+    });
+    expect(plannerRunRef.status).toBe(201);
+    const plannerRun = await plannerRunRef.json();
+
+    const answerRef = await postJson(api, `/planner/runs/${plannerRun.id}/answers`, {
+      answers: {
+        scope: { in: ["apps/api", "packages/agent", "packages/test-runner"] },
+        verification: { required: ["command-backed smoke"] },
+      },
+    });
+    expect(answerRef.status).toBe(200);
+
+    const generateRef = await postJson(
+      api,
+      `/planner/runs/${plannerRun.id}/generate`,
+      buildExecutionLoopSmokeProposal(),
+    );
+    expect(generateRef.status).toBe(200);
+    const generatedPlannerRun = await generateRef.json();
+    expect(generatedPlannerRun.status).toBe("generated");
+    expect(generatedPlannerRun.proposalSummary).toMatchObject({
+      epicCount: 1,
+      taskCount: 1,
+      verificationPlanCount: 1,
+    });
+
+    const plannerApprovalRef = await postJson(api, "/approvals", {
+      projectId: project.id,
+      subjectType: "planner_run",
+      subjectId: plannerRun.id,
+      stage: "planner_review",
+      status: "granted",
+      operator: "hc-92-smoke",
+    });
+    expect(plannerApprovalRef.status).toBe(201);
+
+    const tasksRef = await api.fetch(new Request(`http://localhost/tasks?projectId=${project.id}`));
+    expect(tasksRef.status).toBe(200);
+    const tasks = await tasksRef.json();
+    expect(tasks).toHaveLength(1);
+    const task = tasks[0];
+    expect(task.status).toBe("awaiting_verification_approval");
+
+    const verificationReviewRef = await api.fetch(new Request(`http://localhost/tasks/${task.id}/verification`));
+    expect(verificationReviewRef.status).toBe(200);
+    const verificationReview = await verificationReviewRef.json();
+    expect(verificationReview.summary).toMatchObject({
+      totalCount: 1,
+      runnableCount: 1,
+      deferredCount: 0,
+      allRunnableNow: true,
+    });
+    expect(verificationReview.plan.items[0]).toMatchObject({
+      title: "README smoke output is present",
+      runnableNow: true,
+      deferredReason: null,
+    });
+
+    const verificationApprovalRef = await postJson(api, `/tasks/${task.id}/verification/approve`, {
+      operator: "hc-92-smoke",
+      reason: "Local smoke command is deterministic.",
+    });
+    expect(verificationApprovalRef.status).toBe(200);
+    const approvedTask = await verificationApprovalRef.json();
+    expect(approvedTask.status).toBe("ready");
+    expect(approvedTask.latestVerificationPlan.status).toBe("approved");
+    expect(approvedTask.latestVerificationPlan.items[0].status).toBe("approved");
+
+    const branchRef = await postJson(api, `/tasks/${task.id}/branch`, {});
+    expect(branchRef.status).toBe(200);
+    const branch = await branchRef.json();
+    expect(branch.state).toBe("created");
+    expect(branch.name).toContain("HC-92-SMOKE-1");
+    expect(runCommand("git", ["branch", "--show-current"], tempDir).stdout.trim()).toBe(branch.name);
+
+    const executeRef = await postJson(api, `/tasks/${task.id}/execute`, {});
+    expect(executeRef.status).toBe(201);
+    const execution = await executeRef.json();
+    expect(execution.status).toBe("implementing");
+    expect(execution.task.status).toBe("executing");
+    expect(execution.branch.id).toBe(branch.id);
+    expect(execution.branch.state).toBe("active");
+    expect(execution.latestAgentStep).toMatchObject({
+      role: "executor",
+      modelName: "openai:gpt-smoke",
+      status: "started",
+    });
+    expect(execution.policy.modelResolution.concreteModelName).toBe("openai:gpt-smoke");
+
+    writeProjectFile(tempDir, "README.md", "# execution api\nsmoke patch\n");
+
+    const runTestsRef = await postJson(api, `/executions/${execution.id}/test-runs`, {});
+    expect(runTestsRef.status).toBe(200);
+    const testRuns = await runTestsRef.json();
+    expect(testRuns).toHaveLength(1);
+    const testRun = testRuns[0];
+    expect(testRun).toMatchObject({
+      status: "passed",
+      exitCode: 0,
+      command: buildReadmeSmokeCommand(),
+    });
+    expect(testRun.verificationItem).toMatchObject({
+      kind: "logic",
+      title: "README smoke output is present",
+      status: "green",
+    });
+    expect(testRun.stdoutPath).toContain(`.artifacts/executions/${execution.id}/test-runs/0-`);
+    expect(testRun.stdoutPath && existsSync(testRun.stdoutPath)).toBe(true);
+    expect(testRun.stderrPath && existsSync(testRun.stderrPath)).toBe(true);
+    expect(readFileSync(testRun.stdoutPath, "utf8")).toContain("smoke verified");
+
+    const metaPath = join(dirname(testRun.stdoutPath), "meta.json");
+    expect(existsSync(metaPath)).toBe(true);
+    expect(JSON.parse(readFileSync(metaPath, "utf8"))).toMatchObject({
+      executionId: execution.id,
+      verificationItemId: testRun.verificationItem.id,
+      orderIndex: 0,
+      kind: "logic",
+      title: "README smoke output is present",
+      command: buildReadmeSmokeCommand(),
+      exitCode: 0,
+      status: "passed",
+    });
+
+    const listedTestRunsRef = await api.fetch(new Request(`http://localhost/executions/${execution.id}/test-runs`));
+    expect(listedTestRunsRef.status).toBe(200);
+    expect(await listedTestRunsRef.json()).toHaveLength(1);
+
+    const patchRef = await api.fetch(new Request(`http://localhost/executions/${execution.id}/patch`));
+    expect(patchRef.status).toBe(200);
+    const patch = await patchRef.json();
+    expect(patch.patchReview.status).toBe("ready");
+    expect(patch.patchReview.diffPath).toContain(`.taskgoblin/artifacts/executions/${execution.id}/patch/current.diff`);
+    expect(patch.patchReview.diffPath && existsSync(patch.patchReview.diffPath)).toBe(true);
+    expect(readFileSync(patch.patchReview.diffPath, "utf8")).toContain("smoke patch");
+    expect(patch.execution.status).toBe("patch_ready");
+    expect(patch.execution.task.status).toBe("awaiting_patch_approval");
+    expect(patch.execution.branch.state).toBe("verified");
+
+    const modelDecisions = await prisma.modelDecision.findMany({
+      where: {
+        taskExecutionId: execution.id,
+      },
+    });
+    expect(modelDecisions).toHaveLength(1);
+    expect(modelDecisions[0]?.selectedModel).toBe("openai:gpt-smoke");
+
+    const eventsRef = await api.fetch(new Request(`http://localhost/events?projectId=${project.id}`));
+    expect(eventsRef.status).toBe(200);
+    const events = await eventsRef.json();
+    expect(events.map((event: { type: string }) => event.type)).toEqual(
+      expect.arrayContaining([
+        "planner.started",
+        "planner.answer",
+        "planner.proposed",
+        "approval.granted",
+        "branch.created",
+        "branch.switched",
+        "task.selected",
+        "model.selected",
+        "agent.step.started",
+        "test.started",
+        "test.stdout",
+        "test.finished",
+        "patch.ready",
+      ]),
+    );
+
+    const approvePatchRef = await postJson(api, `/executions/${execution.id}/patch/approve`, {});
+    expect(approvePatchRef.status).toBe(200);
+    const approvedPatch = await approvePatchRef.json();
+    expect(approvedPatch.patchReview.status).toBe("approved");
+    expect(approvedPatch.patchReview.approvedAt).toBeTruthy();
+    expect(approvedPatch.execution.status).toBe("completed");
+    expect(approvedPatch.execution.task.status).toBe("completed");
+    expect(approvedPatch.execution.branch.state).toBe("approved");
+
+    const finalEventsRef = await api.fetch(new Request(`http://localhost/events?projectId=${project.id}`));
+    const finalEvents = await finalEventsRef.json();
+    expect(finalEvents.map((event: { type: string }) => event.type)).toEqual(
+      expect.arrayContaining(["patch.approved", "task.completed"]),
+    );
+  }, 30000);
+
   test("creates, loads, and abandons a task branch through the API", async () => {
     const api = createApp({
       prisma,
@@ -459,20 +678,20 @@ describe("execution API", () => {
     expect(runCommand("git", ["branch", "--show-current"], tempDir).stdout.trim()).toBe(execution.branch.name);
   }, 20000);
 
-  test("runs verification, exposes patch state, and approves the patch in the happy path", async () => {
+  test("rejects a ready patch through the patch review API", async () => {
     const api = createApp({
       prisma,
       env: {
         VIMBUS_TEST_KEY: "present",
       },
     });
-    const { task } = await seedExecutableTask(api, tempDir, {
-      command: "echo verification-passed",
+    const { project, task } = await seedExecutableTask(api, tempDir, {
+      command: "echo ready-to-reject",
     });
     const executeRef = await postJson(api, `/tasks/${task.id}/execute`, {});
     const execution = await executeRef.json();
 
-    writeProjectFile(tempDir, "README.md", "# execution api\nupdated execution output\n");
+    writeProjectFile(tempDir, "README.md", "# execution api\nrejectable patch\n");
 
     const runTestsRef = await postJson(api, `/executions/${execution.id}/test-runs`, {});
     expect(runTestsRef.status).toBe(200);
@@ -491,13 +710,19 @@ describe("execution API", () => {
     expect(patch.patchReview.status).toBe("ready");
     expect(patch.patchReview.summary).toContain("file");
 
-    const approvePatchRef = await postJson(api, `/executions/${execution.id}/patch/approve`, {});
-    expect(approvePatchRef.status).toBe(200);
-    const approvedPatch = await approvePatchRef.json();
+    const rejectPatchRef = await postJson(api, `/executions/${execution.id}/patch/reject`, {});
+    expect(rejectPatchRef.status).toBe(200);
+    const rejectedPatch = await rejectPatchRef.json();
 
-    expect(approvedPatch.patchReview.status).toBe("approved");
-    expect(approvedPatch.execution.status).toBe("completed");
-    expect(approvedPatch.execution.task.status).toBe("completed");
+    expect(rejectedPatch.patchReview.status).toBe("rejected");
+    expect(rejectedPatch.execution.status).toBe("failed");
+    expect(rejectedPatch.execution.task.status).toBe("failed");
+
+    const eventsRef = await api.fetch(
+      new Request(`http://localhost/events?projectId=${project.id}&taskExecutionId=${execution.id}`),
+    );
+    const events = await eventsRef.json();
+    expect(events.map((event: { type: string }) => event.type)).toContain("task.failed");
   }, 20000);
 
   test("marks the task execution failed when verification command execution fails", async () => {
@@ -742,6 +967,52 @@ function buildDefaultExecutionVerificationItems(command: string | null): SeedExe
       command,
     },
   ];
+}
+
+function buildReadmeSmokeCommand() {
+  return "node -e \"const fs=require('node:fs'); const body=fs.readFileSync('README.md','utf8'); if (!body.includes('smoke patch')) process.exit(1); console.log('smoke verified');\"";
+}
+
+function buildExecutionLoopSmokeProposal() {
+  return {
+    summary: "HC-92 deterministic execution-loop smoke",
+    epics: [
+      {
+        key: "HC-92-SMOKE",
+        title: "Execution Loop Smoke",
+        goal: "Exercise the local execution loop from task approval to patch review",
+        orderIndex: 0,
+        acceptance: [{ label: "operator can approve a verified patch" }],
+        risks: [{ label: "verification must stay command-backed and deterministic" }],
+        tasks: [
+          {
+            stableId: "HC-92-SMOKE-1",
+            title: "Run MVP execution loop smoke",
+            description: "Prepare a branch, run command-backed verification, persist artifacts, and approve the patch.",
+            type: "backend",
+            complexity: "medium",
+            orderIndex: 0,
+            acceptance: [{ label: "patch review reaches approved after verification passes" }],
+            targetFiles: ["README.md"],
+            requires: ["executor_default"],
+            verificationPlan: {
+              rationale: "The local smoke uses one deterministic command that checks the generated patch content.",
+              items: [
+                {
+                  kind: "logic",
+                  runner: "custom",
+                  title: "README smoke output is present",
+                  description: "Checks that the execution patch wrote the expected smoke marker.",
+                  command: buildReadmeSmokeCommand(),
+                  orderIndex: 0,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function buildPlannerEpicPayload() {
