@@ -6,7 +6,7 @@ This file is the canonical MVP tracker. Keep it current whenever implementation 
 
 ## Current Position
 
-Status: **CLI console and verification slices complete; MCP is next**.
+Status: **CLI, verification, MCP, wrapper gates, and execution-loop smoke are complete on `main`; evaluation is the next reconciliation item**.
 
 Completed foundations:
 
@@ -43,8 +43,32 @@ Completed foundations:
   - patch-review metadata routes backed by current git diff summary and approval/rejection state
   - isolated SQLite + git fixture tests for repositories, services, API integration, and happy-path execution
   - HC-92 API smoke covers the local operator loop from project/planner setup through verification approval, branch preparation, execution, command-backed verification artifacts, patch metadata, and patch approval; adjacent API tests cover patch rejection, command failure, and unsupported approved verification items
+- CLI console slice exists:
+  - HC-76 added execution, branch, test-run, event, MCP-call, and patch-review command surfaces in `apps/cli/src/execution.ts`
+  - the dashboard exposes the execution command set
+  - CLI smoke and formatter coverage live in `apps/cli/src/execution.test.ts`
+- Verification contract slice exists:
+  - HC-77 centralized runnability/deferred-reason rules in `packages/shared`
+  - task detail and verification review API responses expose runnable/deferred metadata
+  - unsupported non-command items remain explicit deferred work instead of pretending to run
+- MCP runtime slice exists on `main`:
+  - HC-78 added `packages/mcp-client`, MCP server/tool/call repository support, server catalog routes, and MCP call API coverage
+  - HC-91 added minimal fs/git/shell wrappers, argument validation, mutability policy, approval gates, and wrapper service coverage
 
-Immediate gap: MCP client and tool-call approval gates are next. Evaluation, visual verification, and non-command evidence execution remain deferred.
+Jira/repo audit as of 2026-04-24:
+
+| Issue | Jira status | Main repo state | Tracker status | Owner |
+|---|---|---|---|---|
+| HC-76 | Done | Landed on `main` as CLI execution console commands and tests. | done | Aggelos |
+| HC-77 | Done | Landed on `main` as richer verification contract and runnability signalling. | done | Nikos |
+| HC-78 | Done | Landed on `main` as MCP client, server catalog, API routes, and persistence. Wrapper gates landed separately in HC-91. | done | Nikos |
+| HC-79 | Done | Implemented on `origin/dev` at `2c03c18`, but not present on `main`; `main` only has schema/docs for evaluation records. | next | Nikos |
+| HC-80 | To Do | Not implemented on `main`; only schema/docs scaffolding exists for source assets and visual verification. | later | Nikos |
+| HC-81 | To Do | Not implemented on `main`; only schema/docs scaffolding exists for benchmark and regression records. | later | Nikos |
+| HC-82 | To Do | Not implemented on `main`; only schema/docs scaffolding exists for LangSmith trace links. | later | Nikos |
+| HC-83 | To Do | Broader reconciliation/handoff remains open after this tracker update. | later | Aggelos |
+
+Immediate gap: HC-79 needs an explicit main-branch decision: merge/cherry-pick the completed `origin/dev` evaluation slice, or reopen/retarget the Jira work if that branch state is not intended for `main`. HC-80 through HC-82 remain separate Nikos-owned later-slice Jira work.
 
 ## MVP Finish Line
 
@@ -60,7 +84,7 @@ The MVP is done when a local operator can:
 8. See model resolution, tool calls, test output, events, and patch state in the CLI.
 9. Approve or reject the final patch.
 
-Out of MVP unless explicitly pulled forward:
+Deferred from the current `main` finish line unless explicitly pulled forward:
 
 - visual pixel-diff verification
 - benchmark regression gates
@@ -88,20 +112,23 @@ Legend: `done`, `active`, `next`, `later`.
 | done | Execution | Implement deterministic branch prep, minimal execution start, policy snapshot persistence, and execution routes. |
 | done | Test Runner | Execute approved command-backed verification items only, reject unsupported items with 422 payloads, persist stdout/stderr paths plus deterministic artifacts, and emit loop events. |
 | done | Patch Review | Persist diff summary metadata plus patch approval/rejection and completion state. |
-| done | CLI Console | Extend CLI views to executions, events, and patch review. |
-| done | Verification | Implement richer verification contract generation, planner/review feedback, and future non-command runtime handling beyond the current command-only slice. |
-| later | MCP | Add MCP client and minimal fs/git/shell server wrappers with approval gates. |
-| later | Evaluation | Add rule-based evaluation after verification and before patch review. |
-| later | Visual | Add source asset ingestion, screenshot capture, and pixel/PDF checks. |
-| later | Benchmarks | Add benchmark scenarios, regression baselines, and comparison gates. |
-| later | Observability | Add optional LangSmith trace/dataset/export integration. |
+| done | CLI Console | HC-76: extend CLI views to executions, events, test runs, MCP calls, and patch review. |
+| done | Verification | HC-77: implement richer verification contract generation, planner/review feedback, and future non-command runtime handling beyond the current command-only slice. |
+| done | MCP Client/API | HC-78: add MCP client, server catalog, tool-call persistence, and API routes. |
+| done | MCP Wrapper Gates | HC-91: add minimal fs/git/shell wrappers with argument validation, mutability policy, and approval gates. |
+| done | Execution Smoke | HC-92: add end-to-end API smoke from task approval through command verification and patch approval. |
+| next | Evaluation | HC-79: reconcile Jira Done / `origin/dev` implementation with `main`, or retarget if the dev-branch slice should not land. |
+| later | Visual | HC-80: add source asset ingestion, screenshot capture, and pixel/PDF checks. Nikos-owned Jira work. |
+| later | Benchmarks | HC-81: add benchmark scenarios, regression baselines, and comparison gates. Nikos-owned Jira work. |
+| later | Observability | HC-82: add optional LangSmith trace/dataset/export integration. Nikos-owned Jira work. |
+| later | Handoff | HC-83: broader reconciliation and next execution-loop handoff remains open. |
 
 ## Recommended Next Sequence
 
-1. Extend the CLI from planner/task/approval commands into execution, events, test runs, and patch review views.
-2. Materialize richer verification contracts beyond persisted planner payloads, including better planner/review feedback and future non-command item handling.
-3. Layer in MCP-backed verification, evaluation, and richer visual flows after the backend execution loop is stable in the CLI.
-4. Add retry/escalation behavior only after the evaluation and operator surfaces exist.
+1. Resolve HC-79's split state by either landing the completed `origin/dev` evaluation slice on `main` or updating Jira to show the work is not actually complete for `main`.
+2. Keep HC-76, HC-77, HC-78, HC-91, and HC-92 closed; do not duplicate those slices in new follow-up tickets.
+3. Sequence HC-80 visual verification, HC-81 benchmark/regression gates, and HC-82 LangSmith export as separate Nikos-owned later slices after the HC-79 decision.
+4. Add retry/escalation behavior only after evaluation is present on `main` and operator-facing review surfaces can explain the decision.
 
 ## Phase 0 - Documentation
 
@@ -134,15 +161,15 @@ Legend: `done`, `active`, `next`, `later`.
 ## Phase 4 - Execution
 
 - Implement branch policy.
-- Implement MCP client layer.
-- Wrap fs, grep, git, patch, shell, browser, and database capabilities as MCP servers.
-- Enforce MCP tool discovery, allowlists, argument validation, and approval policy.
+- Implement MCP client layer. Done for HC-78 on `main`.
+- Wrap fs, git, and shell capabilities behind the minimal MCP wrapper gate. Done for HC-91 on `main`.
+- Enforce MCP tool discovery, allowlists, argument validation, and approval policy. Minimal gate complete on `main`; broader browser/database wrappers remain future scope.
 - Implement later-slice TDD loop extensions beyond the current command-only verification runner: richer verification materialization, confirm red or pending, implement, verify green.
 
 ## Phase 5 - Evaluation and Adaptive Execution
 
-- Implement rule-based evaluators.
-- Implement OpenEvals-style LLM judge prompts with JSON outputs.
+- Implement rule-based evaluators. HC-79 is Done in Jira and present on `origin/dev`, but not on `main`.
+- Implement OpenEvals-style LLM judge prompts with JSON outputs. HC-79 is Done in Jira and present on `origin/dev`, but not on `main`.
 - Add `planner_quality`, `task_decomposition`, `verification_quality`, `execution_quality`, `outcome_correctness`, `tool_usage_quality`, `security_policy_compliance`, and `regression_risk`.
 - Run evaluation after verification and before patch review.
 - Retry or escalate model when evaluation fails but policy allows recovery.
@@ -150,19 +177,20 @@ Legend: `done`, `active`, `next`, `later`.
 
 ## Phase 6 - Operator Console
 
-- Render task list, branch panel, verification contract, MCP tool usage, model decisions, evaluation scores, regression status, test output, events, and patch review.
-- Support approval actions from the CLI.
+- Render task list, branch panel, verification contract, MCP tool usage, model decisions, test output, events, and patch review. Implemented for current main-backed surfaces by HC-76 and HC-92.
+- Render evaluation scores and regression status after HC-79 is reconciled onto `main` and HC-81 exists.
+- Support approval actions from the CLI. Implemented for current planner, verification, MCP-call, and patch-review surfaces.
 - Stream live loop events through SSE.
 
 ## Phase 7 - Visual Verification
 
-- Add source asset ingestion.
-- Add screenshot capture and pixel diff integration.
-- Add PDF render verification.
-- Store visual result artifacts and hashes.
+- HC-80 later slice: add source asset ingestion.
+- HC-80 later slice: add screenshot capture and pixel diff integration.
+- HC-80 later slice: add PDF render verification.
+- HC-80 later slice: store visual result artifacts and hashes.
 
 ## Phase 8 - Benchmarks and LangSmith
 
-- Add benchmark scenarios for planner, execution, MCP, unsafe tool blocking, and eval-driven retry.
-- Store regression baselines and compare future runs.
-- Add optional LangSmith trace, dataset, and experiment export.
+- HC-81 later slice: add benchmark scenarios for planner, execution, MCP, unsafe tool blocking, and eval-driven retry.
+- HC-81 later slice: store regression baselines and compare future runs.
+- HC-82 later slice: add optional LangSmith trace, dataset, and experiment export.

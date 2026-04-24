@@ -20,26 +20,30 @@ VimbusProMax3000 is a terminal-native, test-first, DB-backed execution system im
 - Deterministic task branch creation and execution startup.
 - Patch review metadata backed by git diff summary/state.
 - Strict command-backed verification runs through `POST /executions/:id/test-runs`.
+- CLI execution surfaces for branch state, executions, test runs, events, MCP calls, and patch review.
+- Richer verification contract metadata with explicit runnable/deferred signalling for non-command items.
+- MCP client, server catalog, tool-call persistence, and minimal fs/git/shell wrapper approval gates.
+- API smoke coverage for the local loop from task approval through command verification and patch approval.
 
 ### Not Built Yet
 
-- Full operator console beyond the current CLI bootstrap and command surfaces.
-- MCP-backed verification and the broader MCP tool execution flow.
-- Post-verification evaluation and adaptive retry/escalation behavior.
-- Rich visual verification flows, source-of-truth asset handling, and non-command evidence execution.
-- Benchmark/regression gates and optional LangSmith export.
+- HC-79 evaluation is Done in Jira and implemented on `origin/dev`, but it is not present on `main`; the next step is to land it on `main` or retarget/reopen the Jira state.
+- HC-80 visual verification, HC-81 benchmark/regression gates, and HC-82 optional LangSmith export remain separate Nikos-owned later-slice Jira work.
+- Broader browser/database MCP wrappers and non-command evidence execution remain outside the current `main` slice.
+- Adaptive retry/escalation behavior remains blocked until evaluation is present on `main`.
 
-Playwright is supported today only when it is stored as a normal shell command inside a verification item, such as `pnpm playwright test` or `bunx playwright test`. It is not a special backend runtime and is not executed through MCP in the current slice.
+Playwright is supported today only when it is stored as a normal shell command inside a verification item, such as `pnpm playwright test` or `bunx playwright test`. It is not a special backend runtime in the current `main` slice.
 
 ## Repository Layout
 
 | Path | Purpose |
 |---|---|
 | `apps/api` | Hono API that owns planner, approval, execution, patch, and model-registry routes. |
-| `apps/cli` | OpenTUI-based CLI entrypoint plus current command-oriented planner/model surfaces. |
+| `apps/cli` | OpenTUI-based CLI entrypoint for planner/model plus execution, event, MCP-call, and patch-review surfaces. |
 | `packages/agent` | Execution orchestration and runtime wiring for task startup and patch decisions. |
 | `packages/db` | Prisma SQLite client, migrations, repositories, and test helpers. |
 | `packages/model-registry` | Provider/model/slot registry and setup flows. |
+| `packages/mcp-client` | MCP server catalog, tool validation, wrapper dispatch, and approval-gated calls. |
 | `packages/planner` | Planner normalization, prompts, slot validation, and generation service. |
 | `packages/policy-engine` | Slot resolution and policy selection logic. |
 | `packages/shared` | Shared enums, guards, and domain constants. |
@@ -96,7 +100,8 @@ bun run typecheck
 3. Approve a task's verification plan so the task becomes executable.
 4. Start task execution, which prepares or switches to the isolated task branch and snapshots model policy.
 5. Run approved verification items that have non-empty shell commands.
-6. Persist test-run output and patch review metadata for operator review.
+6. Persist test-run output, event history, MCP call metadata, and patch review metadata for operator review.
+7. Inspect or act on execution, branch, test-run, event, MCP-call, and patch-review state from the CLI.
 
 Today, this verification step is command-only. Approved visual and evidence items are runnable through the route only when they are backed by a non-empty command.
 
@@ -114,10 +119,10 @@ Recommended follow-up reading:
 
 ## Roadmap / Next Slice
 
-- Extend the CLI from planner/task approval commands into execution, events, test runs, and patch review views.
-- Improve verification contract generation and planner/review feedback beyond the current persisted payload model.
-- Layer in MCP-backed verification, evaluation, and richer visual flows after the execution loop is stable in the CLI.
-- Add retry and escalation behavior after evaluation and operator-facing review surfaces are in place.
+- Resolve HC-79's split state: Jira marks evaluation Done and `origin/dev` contains the implementation, but `main` does not.
+- Keep HC-76 CLI console, HC-77 verification metadata, HC-78 MCP client/API, HC-91 wrapper gates, and HC-92 execution-loop smoke closed; do not duplicate those slices.
+- Sequence HC-80 visual verification, HC-81 benchmark/regression gates, and HC-82 LangSmith export as separate Nikos-owned later slices.
+- Add retry and escalation behavior only after evaluation is present on `main` and the operator surfaces can explain the outcome.
 
 ## Contribution / Repo Expectations
 
