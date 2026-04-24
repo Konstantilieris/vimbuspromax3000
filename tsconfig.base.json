@@ -11,6 +11,7 @@
     "ignoreDeprecations": "6.0",
     "paths": {
       "@vimbuspromax3000/agent": ["packages/agent/src/index.ts"],
+      "@vimbuspromax3000/mcp-client": ["packages/mcp-client/src/index.ts"],
       "@vimbuspromax3000/db": ["packages/db/src/index.ts"],
       "@vimbuspromax3000/db/*": ["packages/db/src/*"],
       "@vimbuspromax3000/model-registry": ["packages/model-registry/src/index.ts"],
