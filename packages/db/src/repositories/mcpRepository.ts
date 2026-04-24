@@ -155,6 +155,7 @@ export async function updateMcpToolCall(db: DatabaseClient, id: string, input: U
 export async function listMcpToolCallsForExecution(db: DatabaseClient, taskExecutionId: string) {
   return db.mcpToolCall.findMany({
     where: { taskExecutionId },
+    include: { tool: true },
     orderBy: [{ createdAt: "asc" }],
   });
 }

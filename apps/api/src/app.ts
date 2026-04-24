@@ -543,20 +543,28 @@ export function createApp(options: ApiAppOptions = {}) {
     const calls = await listMcpToolCallsForExecution(prisma, execution.id);
 
     return context.json({
-      calls: calls.map((c) => ({
-        id: c.id,
-        serverName: c.serverName,
-        toolName: c.toolName,
-        mutability: c.mutability,
-        status: c.status,
-        argumentsHash: c.argumentsHash,
-        latencyMs: c.latencyMs,
-        resultSummary: c.resultSummary,
-        errorSummary: c.errorSummary,
-        createdAt: c.createdAt,
-        finishedAt: c.finishedAt,
-      })),
+      calls: calls.map(formatMcpCall),
     });
+  });
+
+  app.post("/executions/:id/mcp/calls", async (context) => {
+    const execution = await getTaskExecutionDetail(prisma, context.req.param("id"));
+
+    if (!execution) {
+      return context.json({ error: "Execution was not found." }, 404);
+    }
+
+    const body = await context.req.json();
+    const rawArgs = body.args ?? body.arguments ?? {};
+    const call = await mcpService.createToolCall({
+      projectId: execution.task.epic.project.id,
+      taskExecutionId: execution.id,
+      serverName: requireString(body.serverName, "serverName"),
+      toolName: requireString(body.toolName, "toolName"),
+      args: requireRecord(rawArgs, "args"),
+    });
+
+    return context.json({ call: formatMcpCall(call) }, 201);
   });
 
   app.post("/executions/:id/mcp/calls/:callId/approve", async (context) => {
@@ -590,23 +598,38 @@ export function createApp(options: ApiAppOptions = {}) {
       reason: optionalString(body.reason),
       projectId: execution.task.epic.project.id,
     });
+    const callDto = formatMcpCall(updated);
 
     return context.json({
-      call: {
-        id: updated.id,
-        serverName: updated.serverName,
-        toolName: updated.toolName,
-        mutability: updated.mutability,
-        status: updated.status,
-        approvalId: updated.approvalId,
-        argumentsHash: updated.argumentsHash,
-        latencyMs: updated.latencyMs,
-        resultSummary: updated.resultSummary,
-        errorSummary: updated.errorSummary,
-        createdAt: updated.createdAt,
-        finishedAt: updated.finishedAt,
-      },
+      id: callDto.id,
+      status: callDto.status,
+      call: callDto,
     });
+  });
+
+  app.post("/executions/:id/mcp/calls/:callId/execute", async (context) => {
+    const execution = await getTaskExecutionDetail(prisma, context.req.param("id"));
+
+    if (!execution) {
+      return context.json({ error: "Execution was not found." }, 404);
+    }
+
+    const call = await getMcpToolCallDetail(prisma, context.req.param("callId"));
+
+    if (!call) {
+      return context.json({ error: "Tool call was not found." }, 404);
+    }
+
+    if (call.taskExecutionId !== execution.id) {
+      return context.json({ error: "Tool call does not belong to this execution.", code: "CALL_NOT_IN_EXECUTION" }, 422);
+    }
+
+    const result = await mcpService.executeToolCall(call.id);
+    const payload = result.ok
+      ? { call: formatMcpCall(result.call), result: result.result }
+      : { call: formatMcpCall(result.call), error: result.error };
+
+    return context.json(payload, result.status === "blocked" ? 422 : 200);
   });
 
   return app;
@@ -736,6 +759,40 @@ function requireRecord(value: unknown, fieldName: string): Record<string, any> {
   }
 
   return value as Record<string, any>;
+}
+
+function formatMcpCall(call: {
+  id: string;
+  taskExecutionId?: string | null;
+  serverName: string;
+  toolName: string;
+  mutability: string;
+  status: string;
+  approvalId?: string | null;
+  argumentsHash?: string | null;
+  latencyMs?: number | null;
+  resultSummary?: string | null;
+  errorSummary?: string | null;
+  createdAt: Date;
+  finishedAt?: Date | null;
+  tool?: { approvalRequired: boolean } | null;
+}) {
+  return {
+    id: call.id,
+    executionId: call.taskExecutionId ?? null,
+    serverName: call.serverName,
+    toolName: call.toolName,
+    mutability: call.mutability,
+    status: call.status,
+    approvalId: call.approvalId ?? null,
+    requiresApproval: call.tool?.approvalRequired ?? call.mutability !== "read",
+    argumentsHash: call.argumentsHash ?? null,
+    latencyMs: call.latencyMs ?? null,
+    resultSummary: call.resultSummary ?? null,
+    errorSummary: call.errorSummary ?? null,
+    createdAt: call.createdAt,
+    finishedAt: call.finishedAt ?? null,
+  };
 }
 
 function optionalInteger(value: unknown): number | undefined {

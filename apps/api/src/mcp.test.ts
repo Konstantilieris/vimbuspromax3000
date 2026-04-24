@@ -11,6 +11,7 @@ import {
 import {
   createIsolatedPrisma,
   removeTempDir,
+  writeProjectFile,
 } from "@vimbuspromax3000/db/testing";
 import { createMcpService } from "@vimbuspromax3000/mcp-client";
 import type { PrismaClient } from "@vimbuspromax3000/db/client";
@@ -223,6 +224,56 @@ describe("MCP API", () => {
       expect(body.calls[0].mutability).toBe("read");
       expect(body.calls[0].argumentsHash).toBe("abc123");
       expect(body.calls[0].status).toBe("requested");
+    });
+  });
+
+  describe("POST /executions/:id/mcp/calls", () => {
+    test("creates and executes a read-only tool call through the API", async () => {
+      const { project, task } = await seedProject();
+      const { execution } = await seedExecution(project.id, task.id);
+      writeProjectFile(tempDir, "notes.txt", "hello api\n");
+
+      const api = createApp({ prisma });
+      const createdRef = await postJson(api, `/executions/${execution.id}/mcp/calls`, {
+        serverName: "taskgoblin-fs-git",
+        toolName: "read_file",
+        args: { path: "notes.txt" },
+      });
+      expect(createdRef.status).toBe(201);
+      const created = await createdRef.json();
+      expect(created.call.status).toBe("requested");
+      expect(created.call.requiresApproval).toBe(false);
+
+      const executedRef = await postJson(api, `/executions/${execution.id}/mcp/calls/${created.call.id}/execute`, {});
+      expect(executedRef.status).toBe(200);
+      const executed = await executedRef.json();
+      expect(executed.call.status).toBe("succeeded");
+      expect(executed.result.data.content).toBe("hello api\n");
+      expect(executed.call.resultSummary).toContain("Read notes.txt");
+    });
+
+    test("blocks unapproved mutating execution attempts through the API", async () => {
+      const { project, task } = await seedProject();
+      const { execution } = await seedExecution(project.id, task.id);
+      const api = createApp({ prisma });
+      const createdRef = await postJson(api, `/executions/${execution.id}/mcp/calls`, {
+        serverName: "taskgoblin-fs-git",
+        toolName: "apply_patch",
+        args: { patch: "--- a/notes.txt\n+++ b/notes.txt\n" },
+      });
+      const created = await createdRef.json();
+
+      const executedRef = await postJson(api, `/executions/${execution.id}/mcp/calls/${created.call.id}/execute`, {});
+
+      expect(executedRef.status).toBe(422);
+      const executed = await executedRef.json();
+      expect(executed.error.code).toBe("APPROVAL_REQUIRED");
+      expect(executed.call.status).toBe("blocked");
+
+      const stored = await prisma.mcpToolCall.findUnique({ where: { id: created.call.id } });
+      expect(stored?.status).toBe("blocked");
+      expect(stored?.errorSummary).toContain("requires operator approval");
+      expect(stored?.latencyMs).toBeGreaterThanOrEqual(0);
     });
   });
 
