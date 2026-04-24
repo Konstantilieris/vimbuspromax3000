@@ -6,17 +6,21 @@ import {
   createPlannerRun,
   createProject,
   createPrismaClient,
+  getMcpToolCallDetail,
   getPlannerRunDetail,
   getTaskDetail,
+  getTaskExecutionDetail,
   getTaskVerificationReview,
   listApprovals,
   listLoopEvents,
+  listMcpToolCallsForExecution,
   listProjects,
   listTasks,
   persistPlannerProposal,
   type PrismaClient,
   updatePlannerInterview,
 } from "@vimbuspromax3000/db";
+import { createMcpService } from "@vimbuspromax3000/mcp-client";
 import {
   assignSlot,
   createModel,
@@ -78,6 +82,7 @@ export function createApp(options: ApiAppOptions = {}) {
   const plannerService = options.plannerService ?? createPlannerService({ prisma, env });
   const executionService = options.executionService ?? createExecutionService({ prisma, env });
   const testRunnerService = options.testRunnerService ?? createTestRunnerService({ prisma });
+  const mcpService = createMcpService({ prisma });
 
   app.onError((error, context) =>
     context.json(
@@ -483,6 +488,125 @@ export function createApp(options: ApiAppOptions = {}) {
         env,
       ),
     );
+  });
+
+  app.get("/mcp/servers", async (context) => {
+    const projectId = context.req.query("projectId");
+
+    if (!projectId) {
+      return context.json({ error: "projectId query parameter is required." }, 400);
+    }
+
+    const servers = await mcpService.listProjectServers(projectId);
+
+    return context.json({
+      servers: servers.map((s) => ({
+        id: s.id,
+        name: s.name,
+        transport: s.transport,
+        trustLevel: s.trustLevel,
+        status: s.status,
+        toolCount: s.tools.length,
+      })),
+    });
+  });
+
+  app.get("/tasks/:id/mcp/tools", async (context) => {
+    const task = await getTaskDetail(prisma, context.req.param("id"));
+
+    if (!task) {
+      return context.json({ error: "Task was not found." }, 404);
+    }
+
+    const tools = await mcpService.listProjectTools(task.epic.projectId);
+
+    return context.json({
+      tools: tools.map((t) => ({
+        id: t.id,
+        serverName: t.server.name,
+        name: t.name,
+        description: t.description,
+        mutability: t.mutability,
+        approvalRequired: t.approvalRequired,
+        inputSchema: JSON.parse(t.inputSchemaJson) as unknown,
+      })),
+    });
+  });
+
+  app.get("/executions/:id/mcp/calls", async (context) => {
+    const execution = await getTaskExecutionDetail(prisma, context.req.param("id"));
+
+    if (!execution) {
+      return context.json({ error: "Execution was not found." }, 404);
+    }
+
+    const calls = await listMcpToolCallsForExecution(prisma, execution.id);
+
+    return context.json({
+      calls: calls.map((c) => ({
+        id: c.id,
+        serverName: c.serverName,
+        toolName: c.toolName,
+        mutability: c.mutability,
+        status: c.status,
+        argumentsHash: c.argumentsHash,
+        latencyMs: c.latencyMs,
+        resultSummary: c.resultSummary,
+        errorSummary: c.errorSummary,
+        createdAt: c.createdAt,
+        finishedAt: c.finishedAt,
+      })),
+    });
+  });
+
+  app.post("/executions/:id/mcp/calls/:callId/approve", async (context) => {
+    const execution = await getTaskExecutionDetail(prisma, context.req.param("id"));
+
+    if (!execution) {
+      return context.json({ error: "Execution was not found." }, 404);
+    }
+
+    const call = await getMcpToolCallDetail(prisma, context.req.param("callId"));
+
+    if (!call) {
+      return context.json({ error: "Tool call was not found." }, 404);
+    }
+
+    if (call.taskExecutionId !== execution.id) {
+      return context.json({ error: "Tool call does not belong to this execution.", code: "CALL_NOT_IN_EXECUTION" }, 422);
+    }
+
+    if (!(call.tool?.approvalRequired ?? false)) {
+      return context.json({ error: "Tool call does not require approval.", code: "APPROVAL_NOT_REQUIRED" }, 422);
+    }
+
+    if (call.status !== "requested") {
+      return context.json({ error: "Tool call is not in requested state.", code: "CALL_NOT_PENDING" }, 422);
+    }
+
+    const body = await context.req.json();
+    const updated = await mcpService.approveToolCall(call.id, {
+      operator: requireString(body.operator, "operator"),
+      reason: optionalString(body.reason),
+      projectId: execution.task.epic.project.id,
+    });
+
+    return context.json({
+      call: {
+        id: updated.id,
+        serverName: updated.serverName,
+        toolName: updated.toolName,
+        mutability: updated.mutability,
+        status: updated.status,
+        approvalId: updated.approvalId,
+        argumentsHash: updated.argumentsHash,
+        latencyMs: updated.latencyMs,
+        resultSummary: updated.resultSummary,
+        errorSummary: updated.errorSummary,
+        createdAt: updated.createdAt,
+        finishedAt: updated.finishedAt,
+      },
+    });
   });
 
   return app;

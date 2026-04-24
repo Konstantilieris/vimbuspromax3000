@@ -201,6 +201,10 @@ export const MCP_TOOL_CALL_STATUSES = [
 export type McpToolCallStatus = (typeof MCP_TOOL_CALL_STATUSES)[number];
 export const isMcpToolCallStatus = createEnumGuard(MCP_TOOL_CALL_STATUSES);
 
+export const MCP_MUTABILITIES = ["read", "write"] as const;
+export type McpMutability = (typeof MCP_MUTABILITIES)[number];
+export const isMcpMutability = createEnumGuard(MCP_MUTABILITIES);
+
 export const MODEL_SLOT_KEYS = [
   "planner_fast",
   "planner_deep",
