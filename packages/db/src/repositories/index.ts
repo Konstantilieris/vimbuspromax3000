@@ -9,3 +9,4 @@ export * from "./taskRepository";
 export * from "./testRunRepository";
 export * from "./patchReviewRepository";
 export * from "./mcpRepository";
+export * from "./evalRepository";

@@ -17,6 +17,7 @@
       "dependencies": {
         "@vimbuspromax3000/agent": "workspace:*",
         "@vimbuspromax3000/db": "workspace:*",
+        "@vimbuspromax3000/evaluator": "workspace:*",
         "@vimbuspromax3000/mcp-client": "workspace:*",
         "@vimbuspromax3000/model-registry": "workspace:*",
         "@vimbuspromax3000/planner": "workspace:*",
@@ -57,6 +58,17 @@
         "@prisma/adapter-libsql": "7.8.0",
         "@prisma/client": "7.8.0",
         "@vimbuspromax3000/shared": "workspace:*",
+      },
+    },
+    "packages/evaluator": {
+      "name": "@vimbuspromax3000/evaluator",
+      "version": "0.1.0",
+      "dependencies": {
+        "@vimbuspromax3000/agent": "workspace:*",
+        "@vimbuspromax3000/db": "workspace:*",
+        "@vimbuspromax3000/policy-engine": "workspace:*",
+        "@vimbuspromax3000/shared": "workspace:*",
+        "ai": "^6.0.168",
       },
     },
     "packages/mcp-client": {
@@ -350,6 +362,8 @@
     "@vimbuspromax3000/cli": ["@vimbuspromax3000/cli@workspace:apps/cli"],
 
     "@vimbuspromax3000/db": ["@vimbuspromax3000/db@workspace:packages/db"],
+
+    "@vimbuspromax3000/evaluator": ["@vimbuspromax3000/evaluator@workspace:packages/evaluator"],
 
     "@vimbuspromax3000/mcp-client": ["@vimbuspromax3000/mcp-client@workspace:packages/mcp-client"],
 
