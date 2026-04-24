@@ -122,6 +122,7 @@ Recommended follow-up reading:
 - Resolve HC-79's split state: Jira marks evaluation Done and `origin/dev` contains the implementation, but `main` does not.
 - Keep HC-76 CLI console, HC-77 verification metadata, HC-78 MCP client/API, HC-91 wrapper gates, and HC-92 execution-loop smoke closed; do not duplicate those slices.
 - Sequence HC-80 visual verification, HC-81 benchmark/regression gates, and HC-82 LangSmith export as separate Nikos-owned later slices.
+- Use the canonical [MVP backlog dependency map](docs/execution/mvp-plan.md#backlog-dependency-map) for Jira link/order decisions.
 - Add retry and escalation behavior only after evaluation is present on `main` and the operator surfaces can explain the outcome.
 
 ## Contribution / Repo Expectations

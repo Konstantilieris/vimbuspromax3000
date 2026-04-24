@@ -130,6 +130,27 @@ Legend: `done`, `active`, `next`, `later`.
 3. Sequence HC-80 visual verification, HC-81 benchmark/regression gates, and HC-82 LangSmith export as separate Nikos-owned later slices after the HC-79 decision.
 4. Add retry/escalation behavior only after evaluation is present on `main` and operator-facing review surfaces can explain the decision.
 
+## Backlog Dependency Map
+
+Canonical Jira coordination:
+
+- HC-76, HC-77, HC-78, HC-91, and HC-92 are done on `main`; do not create duplicate follow-up slices for those surfaces.
+- HC-79 is the next decision gate: Jira marks it Done and `origin/dev` contains `2c03c18`, but `main` does not contain the evaluation implementation.
+- HC-80, HC-81, and HC-82 remain Nikos-owned later slices and should not be reassigned as part of coordination cleanup.
+- HC-83 is the umbrella handoff task; HC-84 and HC-85 provide the audit and tracker reconciliation trail; HC-93 records the dependency-map cleanup.
+
+Hard dependency order:
+
+| Blocker | Blocked | Reason |
+|---|---|---|
+| HC-79 | HC-81 | Benchmark/regression gates depend on evaluation outputs and dimensions. |
+| HC-79 | HC-82 | LangSmith export links evaluation runs and related observability records. |
+| HC-80 | HC-81 | Visual source-of-truth results feed benchmark/regression comparisons. |
+| HC-81 | HC-82 | LangSmith export can mirror benchmark and regression artifacts after they exist. |
+| HC-84 | HC-93 | The missing-commit audit defines the dependency-map inputs. |
+| HC-85 | HC-93 | The canonical tracker update defines the current done/next/later state. |
+| HC-92 | HC-93 | The execution-loop smoke closes the current main-backed MVP slice before backlog cleanup. |
+
 ## Phase 0 - Documentation
 
 - Create this documentation scaffold.
