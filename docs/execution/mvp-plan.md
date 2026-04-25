@@ -6,7 +6,7 @@ This file is the canonical MVP tracker. Keep it current whenever implementation 
 
 ## Current Position
 
-Status: **CLI, verification, MCP, wrapper gates, and execution-loop smoke are complete on `main`; evaluation is the next reconciliation item**.
+Status: **CLI, verification, MCP, wrapper gates, execution-loop smoke, evaluation gate, visual verification runtime, and onboarding wizard are complete on `main`; benchmark/regression and LangSmith later-slice tickets remain open in Jira**.
 
 Completed foundations:
 
@@ -55,20 +55,25 @@ Completed foundations:
   - HC-78 added `packages/mcp-client`, MCP server/tool/call repository support, server catalog routes, and MCP call API coverage
   - HC-91 added minimal fs/git/shell wrappers, argument validation, mutability policy, approval gates, and wrapper service coverage
 
-Jira/repo audit as of 2026-04-24:
+Jira/repo audit as of 2026-04-25:
 
 | Issue | Jira status | Main repo state | Tracker status | Owner |
 |---|---|---|---|---|
 | HC-76 | Done | Landed on `main` as CLI execution console commands and tests. | done | Aggelos |
 | HC-77 | Done | Landed on `main` as richer verification contract and runnability signalling. | done | Nikos |
 | HC-78 | Done | Landed on `main` as MCP client, server catalog, API routes, and persistence. Wrapper gates landed separately in HC-91. | done | Nikos |
-| HC-79 | Done | Implemented on `origin/dev` at `2c03c18`, but not present on `main`; `main` only has schema/docs for evaluation records. | next | Nikos |
-| HC-80 | To Do | Not implemented on `main`; only schema/docs scaffolding exists for source assets and visual verification. | later | Nikos |
-| HC-81 | To Do | Not implemented on `main`; only schema/docs scaffolding exists for benchmark and regression records. | later | Nikos |
-| HC-82 | To Do | Not implemented on `main`; only schema/docs scaffolding exists for LangSmith trace links. | later | Nikos |
-| HC-83 | To Do | Broader reconciliation/handoff remains open after this tracker update. | later | Aggelos |
+| HC-79 | Done | Landed on `main` at `e5c801d` (cherry-pick of `origin/dev` `2c03c18`): full evaluator package with rule-based, LLM judge, and hybrid evaluators across all 8 dimensions. | done | Nikos |
+| HC-80 | Done | Landed on `main` at `1108df6`: `packages/verification/{capture,diff,pdf}.ts` — Playwright screenshot capture, pixelmatch pixel diff, pdfjs-dist PDF metadata diff. | done | Aggelos |
+| HC-81 | To Do | Full benchmark/regression layer (`packages/benchmarks`) already on `main`; ticket remains open for Nikos to confirm scope coverage and close. | later | Nikos |
+| HC-82 | To Do | LangSmith exporter + link persistence (`packages/observability`) already on `main`; ticket remains open for Nikos to confirm scope coverage and close. | later | Nikos |
+| HC-83 | Done | Tracker reconciliation handoff complete. | done | Aggelos |
+| HC-95 | Done | Landed on `main` at `a7f8ae3`: `apps/cli/src/setup.ts` wizard sequencing project → credentials → models → MCP → health. | done | Aggelos |
+| HC-96 | Done | Landed on `main` at `a7f8ae3`: `packages/model-registry/src/claudeCredentials.ts` — env + `~/.claude/.credentials.json` discovery and read-modify-write persistence. | done | Aggelos |
+| HC-97 | Done | Landed on `main` (commit `d54b665`): `packages/mcp-client` `probeMcpServerDefinition`, `probeStandardMcpServers`, `checkMcpServerPrerequisites`, stdio + http probes. | done | Aggelos |
+| HC-98 | Done | Landed on `main` (commit `d54b665`): `apps/cli/src/mcp.ts` (444 LOC) `/mcp:setup`, `/mcp:add-server`, `/mcp:servers`, plus API routes. | done | Aggelos |
+| HC-99 | Done | Landed on `main` (commit `d54b665`): `/mcp:set-secret` CLI + `POST /mcp/servers/:id/credential` API + persistence. | done | Aggelos |
 
-Immediate gap: HC-79 needs an explicit main-branch decision: merge/cherry-pick the completed `origin/dev` evaluation slice, or reopen/retarget the Jira work if that branch state is not intended for `main`. HC-80 through HC-82 remain separate Nikos-owned later-slice Jira work.
+All current Vimbus MVP slices are now on `main`. HC-81 and HC-82 remain open in Jira but their implementations already shipped on `main` in commit `d54b665`; they should be reviewed by Nikos and either closed or scoped further.
 
 ## MVP Finish Line
 
@@ -86,11 +91,10 @@ The MVP is done when a local operator can:
 
 Deferred from the current `main` finish line unless explicitly pulled forward:
 
-- visual pixel-diff verification
-- benchmark regression gates
-- LangSmith export
 - Postgres hardening
 - smart model escalation beyond configured fallback slots
+- full pixel-diff of rendered PDF pages (HC-80 ships metadata + page-count + text-similarity diff; rendered-page pixel diff is a follow-up)
+- Playwright browser auto-install (HC-80 capture surfaces a clear `BrowserNotInstalledError`; user runs `npx playwright install chromium` once)
 
 ## Active Task List
 
@@ -117,18 +121,21 @@ Legend: `done`, `active`, `next`, `later`.
 | done | MCP Client/API | HC-78: add MCP client, server catalog, tool-call persistence, and API routes. |
 | done | MCP Wrapper Gates | HC-91: add minimal fs/git/shell wrappers with argument validation, mutability policy, and approval gates. |
 | done | Execution Smoke | HC-92: add end-to-end API smoke from task approval through command verification and patch approval. |
-| next | Evaluation | HC-79: reconcile Jira Done / `origin/dev` implementation with `main`, or retarget if the dev-branch slice should not land. |
-| later | Visual | HC-80: add source asset ingestion, screenshot capture, and pixel/PDF checks. Nikos-owned Jira work. |
-| later | Benchmarks | HC-81: add benchmark scenarios, regression baselines, and comparison gates. Nikos-owned Jira work. |
-| later | Observability | HC-82: add optional LangSmith trace/dataset/export integration. Nikos-owned Jira work. |
-| later | Handoff | HC-83: broader reconciliation and next execution-loop handoff remains open. |
+| done | Evaluation | HC-79: full evaluator package (rule-based + LLM judge + hybrid, 8 dimensions). |
+| done | Visual | HC-80: source asset ingestion + screenshot capture (Playwright) + pixel diff (pixelmatch) + PDF metadata diff (pdfjs-dist). |
+| done | Benchmarks | HC-81: benchmark scenarios, baselines, and regression comparison shipped in `packages/benchmarks` (Jira ticket remains open pending Nikos review). |
+| done | Observability | HC-82: optional LangSmith export + link persistence shipped in `packages/observability` (Jira ticket remains open pending Nikos review). |
+| done | Onboarding | HC-95 + HC-96: `/setup` wizard with Claude credential auto-discovery and read-modify-write persistence to `~/.claude/.credentials.json`. |
+| done | MCP Setup | HC-97 + HC-98 + HC-99: prerequisite probe, server connection CLI/API, credential auth configuration. |
+| done | Handoff | HC-83: tracker reconciliation handoff complete. |
 
 ## Recommended Next Sequence
 
-1. Resolve HC-79's split state by either landing the completed `origin/dev` evaluation slice on `main` or updating Jira to show the work is not actually complete for `main`.
-2. Keep HC-76, HC-77, HC-78, HC-91, and HC-92 closed; do not duplicate those slices in new follow-up tickets.
-3. Sequence HC-80 visual verification, HC-81 benchmark/regression gates, and HC-82 LangSmith export as separate Nikos-owned later slices after the HC-79 decision.
-4. Add retry/escalation behavior only after evaluation is present on `main` and operator-facing review surfaces can explain the decision.
+1. Run `bun install` from repo root to reconcile lockfile after the HC-80 visual deps were added (`playwright-core`, `pixelmatch`, `pngjs`, `pdfjs-dist`).
+2. Optional: `npx playwright install chromium` once if HC-80 screenshot capture is exercised; tests run without it.
+3. Have Nikos review HC-81 (benchmarks) and HC-82 (LangSmith) implementations and close the tickets if scope matches expectations.
+4. Add retry/escalation behavior on top of the evaluator verdicts now that the gate is present on `main`.
+5. Follow-up slices: full pixel-diff of rendered PDF pages, Playwright browser auto-install, Postgres hardening.
 
 ## Backlog Dependency Map
 
