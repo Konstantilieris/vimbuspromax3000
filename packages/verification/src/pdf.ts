@@ -44,10 +44,11 @@ export async function readPdfMetadata(path: string): Promise<PdfMetadata> {
     pageTexts.push(pageText);
   }
 
+  const pageCount = doc.numPages;
   await doc.destroy();
 
   return {
-    pageCount: doc.numPages,
+    pageCount,
     textContent: pageTexts.join("\n").trim(),
     bytes: data.length,
   };

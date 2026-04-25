@@ -3,7 +3,7 @@ import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
 
 export type ImageDiffResult =
-  | { matched: true; diffPixels: 0; totalPixels: number }
+  | { matched: true; diffPixels: number; totalPixels: number }
   | { matched: false; diffPixels: number; totalPixels: number; diffPath?: string }
   | {
       matched: false;
@@ -65,7 +65,7 @@ export async function compareImages(
   }
 
   if (diffPixels <= maxDiffPixels) {
-    return { matched: true, diffPixels: 0, totalPixels };
+    return { matched: true, diffPixels, totalPixels };
   }
 
   return {

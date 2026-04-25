@@ -49,6 +49,9 @@ describe("compareImages", () => {
     });
 
     expect(result.matched).toBe(true);
+    if (result.matched) {
+      expect(result.diffPixels).toBe(64);
+    }
   });
 
   it("writes a diff PNG when diffOutputPath is provided", async () => {

@@ -33,23 +33,33 @@ export async function captureScreenshot(input: CaptureScreenshotInput): Promise<
 
   // Lazy-load so importing this module does not require Playwright browsers to be installed.
   const { chromium } = await import("playwright-core");
+  type Browser = Awaited<ReturnType<typeof chromium.launch>>;
+  type BrowserContext = Awaited<ReturnType<Browser["newContext"]>>;
 
-  let browser;
+  let browser: Browser;
   try {
     browser = await chromium.launch({
       executablePath: input.browserExecutablePath,
     });
   } catch (error) {
-    throw new BrowserNotInstalledError(error);
+    if (isBrowserMissingError(error)) {
+      throw new BrowserNotInstalledError(error);
+    }
+    throw error;
   }
 
+  let context: BrowserContext | undefined;
   try {
-    const context = await browser.newContext({ viewport });
+    context = await browser.newContext({ viewport });
     const page = await context.newPage();
     await page.goto(input.url, { waitUntil: "load" });
     await page.screenshot({ path: input.outputPath, fullPage });
   } finally {
-    await browser.close();
+    try {
+      await context?.close();
+    } finally {
+      await browser.close();
+    }
   }
 
   const fileStat = await stat(input.outputPath);
@@ -59,4 +69,27 @@ export async function captureScreenshot(input: CaptureScreenshotInput): Promise<
     viewport,
     bytes: fileStat.size,
   };
+}
+
+function isBrowserMissingError(error: unknown): boolean {
+  if (!isNodeError(error)) {
+    return false;
+  }
+
+  if (error.code === "ENOENT") {
+    return true;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("executable doesn't exist") ||
+    message.includes("executable does not exist") ||
+    message.includes("executable not found") ||
+    message.includes("browser executable not found") ||
+    message.includes("please run the following command to download new browsers")
+  );
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error;
 }
