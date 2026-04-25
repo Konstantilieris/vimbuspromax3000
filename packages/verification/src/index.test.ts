@@ -1,8 +1,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { PNG } from "pngjs";
 import { describe, expect, it } from "vitest";
 import {
+  compareImages,
   ingestSourceAsset,
   planAssetPresenceResult,
   planManualEvidenceResult,
@@ -87,6 +89,38 @@ describe("visual result planning helpers", () => {
   });
 });
 
+describe("end-to-end visual verification", () => {
+  it("ingests an approved source asset and confirms a captured screenshot matches it", async () => {
+    const root = await makeTempRoot();
+    await mkdir(join(root, "docs", "assets"), { recursive: true });
+    const expectedPath = join(root, "docs", "assets", "expected.png");
+    const actualPath = join(root, "actual.png");
+    const drifted = join(root, "drifted.png");
+
+    const expectedBuffer = solidPngBuffer(8, 8, { r: 0, g: 64, b: 128 });
+    await writeFile(expectedPath, expectedBuffer);
+    await writeFile(actualPath, expectedBuffer);
+    await writeFile(drifted, solidPngBuffer(8, 8, { r: 200, g: 32, b: 32 }));
+
+    const expectedAsset = await ingestSourceAsset({
+      projectRoot: root,
+      relativePath: "docs/assets/expected.png",
+    });
+
+    expect(expectedAsset.kind).toBe("image");
+    expect(expectedAsset.metadata).toMatchObject({ kind: "image", width: 8, height: 8, format: "png" });
+
+    const matchResult = await compareImages(actualPath, expectedPath);
+    expect(matchResult.matched).toBe(true);
+
+    const driftResult = await compareImages(drifted, expectedPath);
+    expect(driftResult.matched).toBe(false);
+    if (!driftResult.matched && !("reason" in driftResult)) {
+      expect(driftResult.diffPixels).toBeGreaterThan(0);
+    }
+  });
+});
+
 async function makeTempRoot() {
   const root = join(tmpdir(), `verification-${crypto.randomUUID()}`);
   await mkdir(root, { recursive: true });
@@ -99,4 +133,18 @@ function oneByOnePng() {
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
     "base64",
   );
+}
+
+function solidPngBuffer(width: number, height: number, color: { r: number; g: number; b: number }): Buffer {
+  const png = new PNG({ width, height });
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = (width * y + x) << 2;
+      png.data[idx] = color.r;
+      png.data[idx + 1] = color.g;
+      png.data[idx + 2] = color.b;
+      png.data[idx + 3] = 255;
+    }
+  }
+  return PNG.sync.write(png);
 }

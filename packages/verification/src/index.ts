@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
+export * from "./capture";
+export * from "./diff";
+export * from "./pdf";
+
 export type SourceAssetKind = "image" | "pdf" | "text" | "binary" | "unknown";
 export const SOURCE_ASSET_APPROVAL_REQUIRED_STATUS = "proposed" as const;
 
@@ -54,7 +58,7 @@ export type VisualResultPlanStatus = "passed" | "failed" | "requires_review";
 
 export type VisualResultPlan = {
   verificationItemId: string;
-  kind: "manual-evidence" | "asset-presence";
+  kind: "manual-evidence" | "asset-presence" | "screenshot-diff" | "pdf-diff";
   status: VisualResultPlanStatus;
   summary: string;
   expectedAssets: SourceAssetReference[];

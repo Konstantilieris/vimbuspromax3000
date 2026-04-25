@@ -5,5 +5,15 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^4.10.38",
+    "pixelmatch": "^7.1.0",
+    "playwright-core": "^1.48.0",
+    "pngjs": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/pixelmatch": "^5.2.6",
+    "@types/pngjs": "^6.0.5"
   }
 }
