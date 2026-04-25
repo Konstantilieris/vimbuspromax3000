@@ -9,14 +9,30 @@ export async function evaluateToolUsageQuality(
   model: unknown,
   generator: JudgeGenerator,
   modelName: string,
-): Promise<DimensionResult | null> {
+): Promise<DimensionResult> {
   const threshold = DIMENSION_THRESHOLDS["tool_usage_quality"]!;
 
   const ruleResult = evaluateToolUsageQualityRule(context);
 
-  // No MCP calls → dimension not applicable
   if (ruleResult === null) {
-    return null;
+    const score = 0;
+    return {
+      dimension: "tool_usage_quality",
+      score,
+      threshold,
+      verdict: dimensionVerdict(score, threshold),
+      evaluatorType: "hybrid",
+      reasoning: "No MCP tool-use evidence was recorded for this execution.",
+      modelName,
+      promptVersion: "v1",
+      evidenceJson: JSON.stringify({
+        ruleScore: score,
+        llmScore: null,
+        finalScore: score,
+        totalCalls: 0,
+        missingToolUseEvidence: true,
+      }),
+    };
   }
 
   const llmResult = await evaluateToolUsageQualityLlm(context, model, generator);

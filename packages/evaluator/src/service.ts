@@ -222,10 +222,7 @@ export function createEvaluatorService(options: EvaluatorServiceOptions) {
           regressionResult,
         ];
 
-        // tool_usage_quality may be null (not_applicable when no MCP calls)
-        if (toolUsageResult !== null) {
-          allResults.push(toolUsageResult);
-        }
+        allResults.push(toolUsageResult);
 
         for (const result of allResults) {
           await createEvalResult(prisma, {
@@ -243,7 +240,9 @@ export function createEvaluatorService(options: EvaluatorServiceOptions) {
         }
 
         // Compute aggregate
-        const { aggregateScore, decision } = computeAggregate(allResults);
+        const { aggregateScore, decision } = computeAggregate(allResults, {
+          retryCount: context.execution.retryCount,
+        });
 
         await updateEvalRun(prisma, evalRun.id, {
           status: "completed",

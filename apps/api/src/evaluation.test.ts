@@ -159,7 +159,7 @@ describe("Evaluation API", () => {
       expect(res.status).toBe(404);
     });
 
-    test("runs evaluation and returns all 8 dimension results (7 when no MCP calls)", async () => {
+    test("runs evaluation and returns all 8 dimension results", async () => {
       const { task } = await seedProject();
       const { execution } = await seedExecution(task.id);
       await addTestRun(execution.id, 0);
@@ -177,18 +177,23 @@ describe("Evaluation API", () => {
       expect(evalRun.verdict).toBeDefined();
       expect(typeof evalRun.aggregateScore).toBe("number");
 
-      // No MCP calls → tool_usage_quality is not_applicable → 7 results
-      expect(evalRun.results).toHaveLength(7);
+      expect(evalRun.results).toHaveLength(8);
 
       const dimensions = evalRun.results.map((r: { dimension: string }) => r.dimension);
       expect(dimensions).toContain("outcome_correctness");
       expect(dimensions).toContain("security_policy_compliance");
       expect(dimensions).toContain("execution_quality");
+      expect(dimensions).toContain("tool_usage_quality");
       expect(dimensions).toContain("verification_quality");
       expect(dimensions).toContain("planner_quality");
       expect(dimensions).toContain("task_decomposition");
       expect(dimensions).toContain("regression_risk");
-      expect(dimensions).not.toContain("tool_usage_quality");
+      const toolUsage = evalRun.results.find(
+        (r: { dimension: string }) => r.dimension === "tool_usage_quality",
+      );
+      expect(toolUsage).toBeDefined();
+      expect(toolUsage.score).toBe(0);
+      expect(toolUsage.verdict).toBe("fail");
     });
 
     test("returns 8 results when MCP calls exist", async () => {

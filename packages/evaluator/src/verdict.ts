@@ -12,7 +12,7 @@ export function dimensionVerdict(score: number, threshold: number): EvalVerdict 
   return "fail";
 }
 
-export function computeAggregate(results: DimensionResult[]): {
+export function computeAggregate(results: DimensionResult[], options: { retryCount?: number } = {}): {
   aggregateScore: number;
   decision: EvalDecision;
 } {
@@ -39,12 +39,12 @@ export function computeAggregate(results: DimensionResult[]): {
   const aggregateScore = totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
 
   let decision: EvalDecision;
-  if (aggregateScore > AGGREGATE_PROCEED_THRESHOLD) {
+  if (aggregateScore >= AGGREGATE_PROCEED_THRESHOLD) {
     decision = "proceed";
   } else if (aggregateScore >= AGGREGATE_WARN_THRESHOLD) {
     decision = "warn";
   } else {
-    decision = "fail";
+    decision = (options.retryCount ?? 0) === 0 ? "retry" : "escalate";
   }
 
   return { aggregateScore, decision };
