@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { isSetupCommand, runSetupCommand, SETUP_COMMANDS, type SetupSpawnFn } from "./setup";
 
 const PLACEHOLDER_KEY = "sk-ant-test-redacted-1234567890";
+const DEFAULT_SETUP_SLOTS = "planner_fast,planner_deep,executor_default,executor_strong,reviewer";
 
 type FetchHandler = (
   url: string,
@@ -77,7 +78,23 @@ describe("Setup wizard happy path", () => {
       if (method === "GET" && url.includes("/model-slots")) {
         return Response.json([
           {
+            slotKey: "planner_fast",
+            primaryModel: { slug: "claude-opus-4-7", provider: { key: "anthropic" } },
+          },
+          {
+            slotKey: "planner_deep",
+            primaryModel: { slug: "claude-opus-4-7", provider: { key: "anthropic" } },
+          },
+          {
             slotKey: "executor_default",
+            primaryModel: { slug: "claude-opus-4-7", provider: { key: "anthropic" } },
+          },
+          {
+            slotKey: "executor_strong",
+            primaryModel: { slug: "claude-opus-4-7", provider: { key: "anthropic" } },
+          },
+          {
+            slotKey: "reviewer",
             primaryModel: { slug: "claude-opus-4-7", provider: { key: "anthropic" } },
           },
         ]);
@@ -123,7 +140,7 @@ describe("Setup wizard happy path", () => {
     expect(output).toContain("Step 5/5: health");
     expect(output).toContain("Found Anthropic API key from env");
     expect(output).toContain("Credential source: env");
-    expect(output).toContain("Slots assigned: 1/1");
+    expect(output).toContain("Slots assigned: 5/5");
     expect(output).toContain("Setup complete.");
 
     expect(spawnCalls.map((call) => call.args.join(" "))).toEqual([
@@ -152,7 +169,7 @@ describe("Setup wizard happy path", () => {
         "--status",
         "active",
         "--slots",
-        "executor_default",
+        DEFAULT_SETUP_SLOTS,
       ].join(" "),
       ["run", "cli", "/mcp:setup", "--project-id", "project_1"].join(" "),
     ]);
@@ -193,6 +210,54 @@ describe("Setup wizard happy path", () => {
 
     expect(output).toContain("Found Anthropic API key from claude-cli");
     expect(output).toContain("Credential source: claude-cli");
+  });
+
+  test("passes resolved credentials to subprocesses without mutating process.env", async () => {
+    const previousKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    const spawnEnvKeys: Array<string | undefined> = [];
+
+    const fetchImpl = makeFetch((url, { method }) => {
+      if (method === "GET" && url.endsWith("/projects")) {
+        return Response.json([{ id: "project_1", name: "X", rootPath: "/r", baseBranch: "main" }]);
+      }
+      if (method === "GET" && url.includes("/model-slots")) {
+        return Response.json([{ slotKey: "reviewer", primaryModel: { slug: "claude-opus-4-7" } }]);
+      }
+      if (method === "GET" && url.includes("/mcp/servers")) {
+        return Response.json([]);
+      }
+      if (method === "POST" && url.endsWith("/mcp/probe")) {
+        return Response.json([]);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const spawnImpl: SetupSpawnFn = async (_command, _args, options) => {
+      spawnEnvKeys.push(options.env.ANTHROPIC_API_KEY);
+      return { exitCode: 0, stdout: "ok", stderr: "" };
+    };
+
+    try {
+      await runSetupCommand(["/setup", "--smoke"], {
+        fetch: fetchImpl,
+        spawn: spawnImpl,
+        discoverCredentials: async () => ({ found: true, source: "interactive", apiKey: PLACEHOLDER_KEY }),
+        cwd: "C:/repo",
+        isSmoke: true,
+        isTty: false,
+        configDir: tempDir,
+      });
+
+      expect(spawnEnvKeys).toEqual([PLACEHOLDER_KEY, PLACEHOLDER_KEY]);
+      expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
+    } finally {
+      if (previousKey === undefined) {
+        delete process.env.ANTHROPIC_API_KEY;
+      } else {
+        process.env.ANTHROPIC_API_KEY = previousKey;
+      }
+    }
   });
 });
 
@@ -290,6 +355,30 @@ describe("Setup wizard error paths", () => {
         configDir: tempDir,
       }),
     ).rejects.toThrow(/Health check failed.*taskgoblin-db/);
+  });
+
+  test("unreachable health endpoints fail setup", async () => {
+    const fetchImpl = makeFetch((url, { method }) => {
+      if (method === "GET" && url.endsWith("/projects")) {
+        return Response.json([{ id: "project_1", name: "X", rootPath: "/r", baseBranch: "main" }]);
+      }
+      if (method === "GET" && url.includes("/model-slots")) {
+        return new Response("unavailable", { status: 503 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    await expect(
+      runSetupCommand(["/setup", "--smoke"], {
+        env: { ANTHROPIC_API_KEY: PLACEHOLDER_KEY },
+        fetch: fetchImpl,
+        spawn: makeSpawn(() => ({ exitCode: 0, stdout: "ok" })),
+        cwd: "C:/repo",
+        isSmoke: true,
+        isTty: false,
+        configDir: tempDir,
+      }),
+    ).rejects.toThrow(/Health check failed.*model slots endpoint/);
   });
 });
 

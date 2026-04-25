@@ -1,4 +1,5 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -18,6 +19,8 @@ export type DiscoverOptions = ResolveClaudeOptions;
 
 export type WriteClaudeCredentialsResult = {
   path: string;
+  replacedExistingApiKey: boolean;
+  /** @deprecated Use replacedExistingApiKey. */
   overwroteExisting: boolean;
 };
 
@@ -133,8 +136,19 @@ export async function writeClaudeCredentialsFile(input: {
 
   const next = { ...existing, apiKey: input.apiKey };
   const serialized = `${JSON.stringify(next, null, 2)}\n`;
+  const tmpPath = `${path}.${randomUUID()}.tmp`;
 
-  await writeFile(path, serialized, "utf8");
+  try {
+    await writeFile(tmpPath, serialized, { encoding: "utf8", mode: 0o600 });
+    await rename(tmpPath, path);
+  } catch (error) {
+    try {
+      await unlink(tmpPath);
+    } catch {
+      // ignore cleanup errors; preserve the original write/rename failure
+    }
+    throw error;
+  }
 
   // chmod 600 is meaningless on Windows; ignore failure so we don't block onboarding
   try {
@@ -143,7 +157,11 @@ export async function writeClaudeCredentialsFile(input: {
     // ignore
   }
 
-  return { path, overwroteExisting };
+  return {
+    path,
+    replacedExistingApiKey: overwroteExisting,
+    overwroteExisting,
+  };
 }
 
 function formatError(error: unknown): string {

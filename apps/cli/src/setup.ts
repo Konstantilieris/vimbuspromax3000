@@ -13,6 +13,7 @@ import {
 } from "@vimbuspromax3000/model-registry";
 
 export const SETUP_COMMANDS = ["/setup", "/setup:run"] as const;
+const DEFAULT_SETUP_SLOTS = "planner_fast,planner_deep,executor_default,executor_strong,reviewer";
 
 export type SetupCommand = (typeof SETUP_COMMANDS)[number];
 
@@ -82,7 +83,7 @@ export async function runSetupCommand(
 ): Promise<string> {
   const command = (args.find(isSetupCommand) as SetupCommand | undefined) ?? "/setup";
   const parsed = parseOptions(args.filter((arg) => arg !== command));
-  const env = commandOptions.env ?? process.env;
+  const env: NodeJS.ProcessEnv = { ...(commandOptions.env ?? process.env) };
   const apiUrl = withoutTrailingSlash(parsed["api-url"] ?? env.VIMBUS_API_URL ?? "http://localhost:3000");
   const request = commandOptions.fetch ?? fetch;
   const cwd = commandOptions.cwd ?? process.cwd();
@@ -134,22 +135,17 @@ export async function runSetupCommand(
     log,
   });
 
-  // Surface the resolved key in-process so models/MCP setup can use it.
-  if (env === process.env) {
-    process.env.ANTHROPIC_API_KEY = credentials.apiKey;
-  } else {
-    env.ANTHROPIC_API_KEY = credentials.apiKey;
-  }
+  const setupEnv: NodeJS.ProcessEnv = { ...env, ANTHROPIC_API_KEY: credentials.apiKey };
 
   log("");
   log("Step 3/5: models");
 
-  await runModelsStep({ projectId: project.id, parsed, env, spawnFn, log });
+  await runModelsStep({ projectId: project.id, parsed, env: setupEnv, spawnFn, log });
 
   log("");
   log("Step 4/5: mcp");
 
-  await runMcpStep({ projectId: project.id, parsed, env, spawnFn, log });
+  await runMcpStep({ projectId: project.id, parsed, env: setupEnv, spawnFn, log });
 
   log("");
   log("Step 5/5: health");
@@ -294,7 +290,7 @@ async function resolveCredentials(input: ResolveCredentialsInput): Promise<Resol
 
   const writeResult = await input.writeCreds({ apiKey: provided, opts: input.credOpts });
   input.log(`Wrote API key to ${writeResult.path}.`);
-  if (writeResult.overwroteExisting) {
+  if (writeResult.replacedExistingApiKey) {
     input.log("Warning: overwrote a previously stored apiKey in this file.");
   }
 
@@ -349,18 +345,33 @@ type HealthCheckInput = {
 
 async function runHealthCheck(input: HealthCheckInput): Promise<{ ok: boolean; reason?: string }> {
   const slots = await safeRequest<ApiSlot[]>(input.request, `${input.apiUrl}/model-slots?projectId=${encodeURIComponent(input.projectId)}`);
+  if (slots === null) {
+    return { ok: false, reason: "Could not reach model slots endpoint." };
+  }
+
   const assigned = (slots ?? []).filter((slot) => slot.primaryModel).length;
-  const total = slots?.length ?? 0;
+  const total = slots.length;
 
   const probe = await safeRequest<ApiMcpProbe[]>(input.request, `${input.apiUrl}/mcp/probe`, {
     method: "POST",
     body: { projectId: input.projectId },
   });
+  if (probe === null) {
+    return { ok: false, reason: "Could not reach MCP probe endpoint." };
+  }
+
   const probes = probe ?? [];
   const failures = probes.filter((entry) => !entry.ok);
 
-  const servers = await safeRequest<ApiMcpServer[]>(input.request, `${input.apiUrl}/mcp/servers?projectId=${encodeURIComponent(input.projectId)}`);
-  const serverCount = Array.isArray(servers) ? servers.length : (servers as { servers?: ApiMcpServer[] } | null)?.servers?.length ?? 0;
+  const servers = await safeRequest<ApiMcpServer[] | { servers?: ApiMcpServer[] }>(
+    input.request,
+    `${input.apiUrl}/mcp/servers?projectId=${encodeURIComponent(input.projectId)}`,
+  );
+  if (servers === null) {
+    return { ok: false, reason: "Could not reach MCP servers endpoint." };
+  }
+
+  const serverCount = Array.isArray(servers) ? servers.length : (servers.servers?.length ?? 0);
 
   input.log(`Project: ${input.projectId}`);
   input.log(`Credential source: ${input.credentialSource}`);
@@ -400,7 +411,7 @@ function buildModelsArgs(projectId: string, parsed: ParsedOptions): string[] {
   args.push("--model-slug", parsed["model-slug"] ?? "claude-opus-4-7");
   args.push("--capabilities", parsed.capabilities ?? "tools,json,streaming");
   args.push("--status", parsed["model-status"] ?? "active");
-  args.push("--slots", parsed.slots ?? "executor_default");
+  args.push("--slots", parsed.slots ?? DEFAULT_SETUP_SLOTS);
 
   if (parsed["api-url"]) {
     args.push("--api-url", parsed["api-url"]);
@@ -448,7 +459,6 @@ const defaultSpawn: SetupSpawnFn = async (command, args, options) => {
     const spawnOptions: SpawnOptions = {
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
-      shell: process.platform === "win32",
     };
     const child = spawn(command, [...args], spawnOptions);
     let stdout = "";

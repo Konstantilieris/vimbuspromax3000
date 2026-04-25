@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -170,9 +170,20 @@ describe("writeClaudeCredentialsFile", () => {
       opts: { configDir: tempDir },
     });
     expect(result.overwroteExisting).toBe(false);
+    expect(result.replacedExistingApiKey).toBe(false);
 
     const raw = await readFile(result.path, "utf8");
     expect(JSON.parse(raw)).toEqual({ apiKey: PLACEHOLDER_KEY });
+  });
+
+  test("does not leave an atomic-write temp file after success", async () => {
+    await writeClaudeCredentialsFile({
+      apiKey: PLACEHOLDER_KEY,
+      opts: { configDir: tempDir },
+    });
+
+    const entries = await readdir(tempDir);
+    expect(entries.filter((entry) => entry.startsWith(".credentials.json.") || entry.endsWith(".tmp"))).toEqual([]);
   });
 
   test("creates parent directory when it is missing", async () => {
@@ -182,6 +193,7 @@ describe("writeClaudeCredentialsFile", () => {
       opts: { configDir: nested },
     });
     expect(result.overwroteExisting).toBe(false);
+    expect(result.replacedExistingApiKey).toBe(false);
 
     const raw = await readFile(result.path, "utf8");
     expect(JSON.parse(raw)).toEqual({ apiKey: PLACEHOLDER_KEY });
@@ -199,6 +211,7 @@ describe("writeClaudeCredentialsFile", () => {
     });
 
     expect(result.overwroteExisting).toBe(false);
+    expect(result.replacedExistingApiKey).toBe(false);
     const raw = await readFile(result.path, "utf8");
     expect(JSON.parse(raw)).toEqual({
       refreshToken: "rt-existing",
@@ -219,6 +232,7 @@ describe("writeClaudeCredentialsFile", () => {
     });
 
     expect(result.overwroteExisting).toBe(true);
+    expect(result.replacedExistingApiKey).toBe(true);
     const raw = await readFile(result.path, "utf8");
     expect(JSON.parse(raw)).toEqual({ apiKey: PLACEHOLDER_KEY, label: "before" });
   });
@@ -233,6 +247,7 @@ describe("writeClaudeCredentialsFile", () => {
       opts: { configDir: tempDir },
     });
     expect(result.overwroteExisting).toBe(false);
+    expect(result.replacedExistingApiKey).toBe(false);
   });
 
   test("rejects refusing to write a too-short key", async () => {
