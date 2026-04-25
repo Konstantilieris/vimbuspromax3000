@@ -10,6 +10,8 @@ export type CreateTaskExecutionInput = {
   branchId: string;
   status: ExecutionStatus;
   retryCount?: number;
+  escalationLevel?: number;
+  lastEvalRunId?: string | null;
   policyJson?: string | null;
   startedAt?: Date | null;
   finishedAt?: Date | null;
@@ -18,6 +20,8 @@ export type CreateTaskExecutionInput = {
 export type UpdateTaskExecutionInput = {
   status?: ExecutionStatus;
   retryCount?: number;
+  escalationLevel?: number;
+  lastEvalRunId?: string | null;
   policyJson?: string | null;
   startedAt?: Date | null;
   finishedAt?: Date | null;
@@ -70,6 +74,8 @@ export async function createTaskExecution(db: DatabaseClient, input: CreateTaskE
       branchId: input.branchId,
       status: input.status,
       retryCount: input.retryCount ?? 0,
+      escalationLevel: input.escalationLevel ?? 0,
+      lastEvalRunId: input.lastEvalRunId ?? null,
       policyJson: input.policyJson ?? null,
       startedAt: input.startedAt ?? null,
       finishedAt: input.finishedAt ?? null,
@@ -191,6 +197,8 @@ export async function updateTaskExecution(db: DatabaseClient, id: string, input:
     data: {
       status: input.status,
       retryCount: input.retryCount,
+      escalationLevel: input.escalationLevel,
+      lastEvalRunId: input.lastEvalRunId,
       policyJson: input.policyJson,
       startedAt: input.startedAt,
       finishedAt: input.finishedAt,

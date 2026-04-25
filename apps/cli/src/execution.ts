@@ -14,6 +14,9 @@ export const EXECUTION_COMMANDS = [
   "/events",
   "/mcp-calls",
   "/mcp-calls:approve",
+  "/evaluations",
+  "/evaluations:show",
+  "/evaluations:run",
 ] as const;
 
 export type ExecutionCommandOptions = {
@@ -85,6 +88,25 @@ type ApiApproval = {
   status: string;
 };
 
+export type ApiEvalResult = {
+  dimension: string;
+  score: number;
+  threshold: number;
+  verdict: string;
+  reasoning?: string | null;
+};
+
+export type ApiEvalRun = {
+  id: string;
+  status: string;
+  verdict?: string | null;
+  aggregateScore?: number | null;
+  threshold?: number | null;
+  finishedAt?: string | null;
+  createdAt?: string | null;
+  results?: ApiEvalResult[];
+};
+
 export function isExecutionCommand(value: string): boolean {
   return EXECUTION_COMMANDS.includes(value as (typeof EXECUTION_COMMANDS)[number]);
 }
@@ -126,6 +148,12 @@ export async function runExecutionCommand(
       return runListMcpCalls(apiUrl, parsed, request);
     case "/mcp-calls:approve":
       return runApproveMcpCall(apiUrl, parsed, request);
+    case "/evaluations":
+      return runListEvaluations(apiUrl, parsed, request);
+    case "/evaluations:show":
+      return runShowEvaluation(apiUrl, parsed, request);
+    case "/evaluations:run":
+      return runRunEvaluation(apiUrl, parsed, request);
   }
 
   throw new Error(`Unknown execution command: ${command}`);
@@ -170,8 +198,8 @@ export function getTestRunsViewSnapshot(testRuns: ApiTestRun[]): string {
   return lines.join("\n");
 }
 
-export function getPatchViewSnapshot(patch: ApiPatch): string {
-  return [
+export function getPatchViewSnapshot(patch: ApiPatch, latestEvaluation?: ApiEvalRun | null): string {
+  const lines = [
     `${PRODUCT_NAME} patch`,
     `Execution: ${patch.executionId}`,
     `Status: ${patch.status}`,
@@ -179,7 +207,102 @@ export function getPatchViewSnapshot(patch: ApiPatch): string {
     `Files changed: ${patch.filesChanged ?? "n/a"}`,
     `Lines: +${patch.linesAdded ?? 0} -${patch.linesRemoved ?? 0}`,
     `Summary: ${patch.diffSummary ?? "none"}`,
-  ].join("\n");
+  ];
+
+  if (latestEvaluation === undefined) {
+    return lines.join("\n");
+  }
+
+  if (latestEvaluation === null) {
+    lines.push("Evaluation: not run (use /evaluations:run --execution-id <id>)");
+    return lines.join("\n");
+  }
+
+  const decision = latestEvaluation.verdict ?? "unknown";
+  const score = latestEvaluation.aggregateScore ?? 0;
+  const threshold = latestEvaluation.threshold ?? "n/a";
+  lines.push("");
+  lines.push(`Evaluation: ${latestEvaluation.status} (${latestEvaluation.id})`);
+  lines.push(`Decision: ${decision}   Score: ${score}/${threshold}`);
+
+  const results = latestEvaluation.results ?? [];
+
+  if (results.length > 0) {
+    lines.push("Dimensions:");
+    for (const result of results) {
+      const verdictLabel = result.verdict.padEnd(5);
+      const dimensionLabel = result.dimension.padEnd(28);
+      lines.push(`  ${verdictLabel} ${dimensionLabel} ${result.score}/${result.threshold}`);
+    }
+
+    const concerns = results.filter((result) => result.verdict !== "pass");
+
+    if (concerns.length > 0) {
+      lines.push("Concerns:");
+      for (const concern of concerns.slice(0, 3)) {
+        const reason = (concern.reasoning ?? "").split(/[\.\n]/, 1)[0]?.trim();
+        lines.push(`  - ${concern.dimension}: ${reason || "below threshold"}`);
+      }
+    }
+  }
+
+  lines.push("Note: verdict is informational; approval is not blocked.");
+
+  return lines.join("\n");
+}
+
+export function getEvaluationsViewSnapshot(runs: ApiEvalRun[]): string {
+  const lines = [`${PRODUCT_NAME} evaluations`];
+
+  if (runs.length === 0) {
+    lines.push("No evaluation runs.");
+    return lines.join("\n");
+  }
+
+  for (const run of runs) {
+    const decision = run.verdict ?? "n/a";
+    const score = run.aggregateScore ?? 0;
+    const threshold = run.threshold ?? "n/a";
+    const finished = run.finishedAt ?? run.createdAt ?? "";
+    lines.push(`- ${run.id} ${run.status} decision=${decision} score=${score}/${threshold} ${finished}`);
+  }
+
+  return lines.join("\n");
+}
+
+export function getEvaluationDetailSnapshot(run: ApiEvalRun): string {
+  const lines = [
+    `${PRODUCT_NAME} evaluation`,
+    `Run: ${run.id}`,
+    `Status: ${run.status}`,
+    `Decision: ${run.verdict ?? "n/a"}`,
+    `Score: ${run.aggregateScore ?? 0}/${run.threshold ?? "n/a"}`,
+  ];
+
+  const results = run.results ?? [];
+
+  if (results.length === 0) {
+    lines.push("No dimension results.");
+  } else {
+    lines.push("Dimensions:");
+    for (const result of results) {
+      const verdictLabel = result.verdict.padEnd(5);
+      const dimensionLabel = result.dimension.padEnd(28);
+      lines.push(`  ${verdictLabel} ${dimensionLabel} ${result.score}/${result.threshold}`);
+    }
+
+    const concerns = results.filter((result) => result.verdict !== "pass");
+
+    if (concerns.length > 0) {
+      lines.push("Concerns:");
+      for (const concern of concerns) {
+        const reason = (concern.reasoning ?? "").split(/[\.\n]/, 1)[0]?.trim();
+        lines.push(`  - ${concern.dimension}: ${reason || "below threshold"}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
 }
 
 export function getEventsViewSnapshot(events: ApiEvent[]): string {
@@ -301,7 +424,58 @@ async function runShowPatch(apiUrl: string, options: ParsedOptions, request: typ
     request,
     `${apiUrl}/executions/${encodeURIComponent(executionId)}/patch`,
   );
-  return getPatchViewSnapshot(patch);
+
+  let latestEvaluation: ApiEvalRun | null = null;
+
+  try {
+    const evaluations = await requestJson<{ evalRuns: ApiEvalRun[] }>(
+      request,
+      `${apiUrl}/executions/${encodeURIComponent(executionId)}/evaluations`,
+    );
+    const completed = (evaluations.evalRuns ?? []).filter((run) => run.status === "completed");
+    latestEvaluation = completed[0] ?? null;
+  } catch {
+    // Soft gate: failures fetching evaluations must not break the patch view.
+    latestEvaluation = null;
+  }
+
+  return getPatchViewSnapshot(patch, latestEvaluation);
+}
+
+async function runListEvaluations(apiUrl: string, options: ParsedOptions, request: typeof fetch) {
+  const executionId = requireOption(options, "execution-id");
+  const response = await requestJson<{ evalRuns: ApiEvalRun[] }>(
+    request,
+    `${apiUrl}/executions/${encodeURIComponent(executionId)}/evaluations`,
+  );
+  return getEvaluationsViewSnapshot(response.evalRuns ?? []);
+}
+
+async function runShowEvaluation(apiUrl: string, options: ParsedOptions, request: typeof fetch) {
+  const executionId = requireOption(options, "execution-id");
+  const response = await requestJson<{ evalRuns: ApiEvalRun[] }>(
+    request,
+    `${apiUrl}/executions/${encodeURIComponent(executionId)}/evaluations`,
+  );
+  const target = options["eval-run-id"]
+    ? response.evalRuns.find((run) => run.id === options["eval-run-id"])
+    : response.evalRuns.find((run) => run.status === "completed") ?? response.evalRuns[0];
+
+  if (!target) {
+    return `${PRODUCT_NAME} evaluation\nNo evaluation runs found for execution ${executionId}.`;
+  }
+
+  return getEvaluationDetailSnapshot(target);
+}
+
+async function runRunEvaluation(apiUrl: string, options: ParsedOptions, request: typeof fetch) {
+  const executionId = requireOption(options, "execution-id");
+  const response = await requestJson<{ evalRun: ApiEvalRun }>(
+    request,
+    `${apiUrl}/executions/${encodeURIComponent(executionId)}/evaluations`,
+    { method: "POST", body: {} },
+  );
+  return getEvaluationDetailSnapshot(response.evalRun);
 }
 
 async function runApprovePatch(apiUrl: string, options: ParsedOptions, request: typeof fetch) {

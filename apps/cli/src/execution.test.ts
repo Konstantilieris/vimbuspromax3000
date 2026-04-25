@@ -1,6 +1,8 @@
 import {
   EXECUTION_COMMANDS,
   getBranchViewSnapshot,
+  getEvaluationDetailSnapshot,
+  getEvaluationsViewSnapshot,
   getEventsViewSnapshot,
   getExecutionViewSnapshot,
   getMcpCallsViewSnapshot,
@@ -166,6 +168,112 @@ describe("CLI execution console", () => {
     expect(EXECUTION_COMMANDS).toContain("/execution:start");
     expect(EXECUTION_COMMANDS).toContain("/patch:approve");
     expect(EXECUTION_COMMANDS).toContain("/events");
+    expect(EXECUTION_COMMANDS).toContain("/evaluations");
+    expect(EXECUTION_COMMANDS).toContain("/evaluations:show");
+    expect(EXECUTION_COMMANDS).toContain("/evaluations:run");
+  });
+
+  test("getEvaluationsViewSnapshot renders run rows", () => {
+    const snapshot = getEvaluationsViewSnapshot([
+      {
+        id: "run_1",
+        status: "completed",
+        verdict: "proceed",
+        aggregateScore: 90,
+        threshold: 75,
+        finishedAt: "2026-04-25T12:00:00.000Z",
+      },
+      {
+        id: "run_2",
+        status: "completed",
+        verdict: "fail",
+        aggregateScore: 40,
+        threshold: 75,
+        finishedAt: "2026-04-25T13:00:00.000Z",
+      },
+    ]);
+
+    expect(snapshot).toContain("run_1 completed decision=proceed score=90/75");
+    expect(snapshot).toContain("run_2 completed decision=fail score=40/75");
+  });
+
+  test("getEvaluationsViewSnapshot renders empty state", () => {
+    expect(getEvaluationsViewSnapshot([])).toContain("No evaluation runs.");
+  });
+
+  test("getEvaluationDetailSnapshot renders dimensions and concerns", () => {
+    const snapshot = getEvaluationDetailSnapshot({
+      id: "run_1",
+      status: "completed",
+      verdict: "warn",
+      aggregateScore: 72,
+      threshold: 75,
+      results: [
+        {
+          dimension: "outcome_correctness",
+          score: 90,
+          threshold: 85,
+          verdict: "pass",
+          reasoning: "Acceptance criteria covered.",
+        },
+        {
+          dimension: "verification_quality",
+          score: 65,
+          threshold: 80,
+          verdict: "warn",
+          reasoning: "Acceptance items lack runners. Consider adding shell runners.",
+        },
+      ],
+    });
+
+    expect(snapshot).toContain("Decision: warn");
+    expect(snapshot).toContain("Score: 72/75");
+    expect(snapshot).toContain("pass  outcome_correctness");
+    expect(snapshot).toContain("warn  verification_quality");
+    expect(snapshot).toContain("Concerns:");
+    expect(snapshot).toContain("verification_quality: Acceptance items lack runners");
+  });
+
+  test("getPatchViewSnapshot renders evaluation section when provided", () => {
+    const snapshot = getPatchViewSnapshot(
+      {
+        executionId: "exec_1",
+        status: "ready",
+        approvalStatus: "pending",
+        filesChanged: 3,
+        linesAdded: 42,
+        linesRemoved: 7,
+        diffSummary: "Added execution CLI commands",
+      },
+      {
+        id: "run_1",
+        status: "completed",
+        verdict: "fail",
+        aggregateScore: 40,
+        threshold: 75,
+        results: [
+          { dimension: "outcome_correctness", score: 30, threshold: 85, verdict: "fail", reasoning: "Tests fail." },
+        ],
+      },
+    );
+
+    expect(snapshot).toContain("Evaluation: completed");
+    expect(snapshot).toContain("Decision: fail");
+    expect(snapshot).toContain("fail  outcome_correctness");
+    expect(snapshot).toContain("Note: verdict is informational; approval is not blocked.");
+  });
+
+  test("getPatchViewSnapshot renders 'not run' hint when latestEvaluation is null", () => {
+    const snapshot = getPatchViewSnapshot(
+      {
+        executionId: "exec_1",
+        status: "ready",
+        diffSummary: "x",
+      },
+      null,
+    );
+
+    expect(snapshot).toContain("Evaluation: not run");
   });
 
   test("runs the execution smoke flow through API-backed commands", async () => {
@@ -277,6 +385,10 @@ describe("CLI execution console", () => {
         return Response.json({ ...state.patchApproval, status: "rejected" }, { status: 201 });
       }
 
+      if (url.includes("/exec_1/evaluations") && method === "GET") {
+        return Response.json({ evalRuns: [] });
+      }
+
       if (url.includes("/exec_1/patch") && method === "GET") {
         return Response.json(state.patch);
       }
@@ -365,6 +477,7 @@ describe("CLI execution console", () => {
       "POST http://localhost:3000/executions/exec_1/test-runs",
       "GET http://localhost:3000/executions/exec_1/test-runs",
       "GET http://localhost:3000/executions/exec_1/patch",
+      "GET http://localhost:3000/executions/exec_1/evaluations",
       "GET http://localhost:3000/events?projectId=project_1&taskId=task_1",
       "POST http://localhost:3000/executions/exec_1/patch/approve",
       "GET http://localhost:3000/executions/exec_1/mcp/calls",

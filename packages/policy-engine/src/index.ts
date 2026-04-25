@@ -240,3 +240,15 @@ async function emitModelEvent(
     },
   });
 }
+
+const EXECUTOR_SLOT_LADDER: ReadonlyArray<ModelSlotKey> = ["executor_default", "executor_strong"];
+
+export function nextExecutorSlot(slotKey: ModelSlotKey): ModelSlotKey | null {
+  const index = EXECUTOR_SLOT_LADDER.indexOf(slotKey);
+
+  if (index === -1 || index === EXECUTOR_SLOT_LADDER.length - 1) {
+    return null;
+  }
+
+  return EXECUTOR_SLOT_LADDER[index + 1] ?? null;
+}

@@ -975,6 +975,319 @@ describe("execution API", () => {
   });
 });
 
+describe("post-execution pipeline integration", () => {
+  let prisma: PrismaClient;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    const isolated = await createIsolatedPrisma("vimbus-pipeline-");
+    prisma = isolated.prisma;
+    tempDir = isolated.tempDir;
+    initializeGitRepository(tempDir, {
+      baseBranch: "main",
+      initialFiles: { "README.md": "# pipeline\n" },
+    });
+  });
+
+  afterEach(async () => {
+    await prisma.$disconnect();
+    removeTempDir(tempDir);
+  });
+
+  test("soft-gate fail verdict surfaces in /patch but does not block approval", async () => {
+    const evaluatorRunCalls: string[] = [];
+    const fakeEvaluator = {
+      runEvaluation: async (executionId: string) => {
+        evaluatorRunCalls.push(executionId);
+        const project = await prisma.project.findFirst();
+        if (!project) throw new Error("project required");
+        const evalRun = await prisma.evalRun.create({
+          data: {
+            projectId: project.id,
+            taskExecutionId: executionId,
+            status: "completed",
+            verdict: "fail",
+            aggregateScore: 40,
+            threshold: 75,
+            finishedAt: new Date(),
+          },
+        });
+        await prisma.evalResult.create({
+          data: {
+            evalRunId: evalRun.id,
+            dimension: "outcome_correctness",
+            score: 40,
+            threshold: 85,
+            verdict: "fail",
+            evaluatorType: "rule_based",
+            reasoning: "synthetic failure",
+          },
+        });
+        await prisma.taskExecution.update({
+          where: { id: executionId },
+          data: { lastEvalRunId: evalRun.id },
+        });
+        return prisma.evalRun.findUnique({
+          where: { id: evalRun.id },
+          include: { results: true },
+        });
+      },
+      listEvalRuns: async () => [],
+    };
+
+    const api = createApp({
+      prisma,
+      env: { VIMBUS_TEST_KEY: "present" },
+      evaluatorService: fakeEvaluator as never,
+    });
+
+    const execution = await runSmokeUntilPatchReady(api, prisma, tempDir, "PIPE-1");
+    expect(evaluatorRunCalls).toEqual([execution.id]);
+
+    const patchRef = await api.fetch(new Request(`http://localhost/executions/${execution.id}/patch`));
+    expect(patchRef.status).toBe(200);
+    const patch = await patchRef.json();
+    expect(patch.pipelineStatus).toBe("completed");
+    expect(patch.latestEvaluation).toMatchObject({
+      decision: "fail",
+      aggregateScore: 40,
+    });
+    expect(patch.execution.status).toBe("patch_ready");
+
+    const approvePatchRef = await postJson(api, `/executions/${execution.id}/patch/approve`, {});
+    expect(approvePatchRef.status).toBe(200);
+    const approved = await approvePatchRef.json();
+    expect(approved.patchReview.status).toBe("approved");
+    expect(approved.execution.status).toBe("completed");
+    expect(approved.latestEvaluation?.decision).toBe("fail");
+
+    const events = await listEventTypes(api, execution);
+    expect(events).toContain("execution.evaluated");
+  }, 30000);
+
+  test("auto-retries then escalates on retry/escalate verdicts before proceeding", async () => {
+    const verdictSequence: ("retry" | "escalate" | "proceed")[] = ["retry", "escalate", "proceed"];
+    const evaluatorRunCalls: string[] = [];
+
+    const fakeEvaluator = {
+      runEvaluation: async (executionId: string) => {
+        evaluatorRunCalls.push(executionId);
+        const verdict = verdictSequence.shift() ?? "proceed";
+        const project = await prisma.project.findFirst();
+        if (!project) throw new Error("project required");
+        const evalRun = await prisma.evalRun.create({
+          data: {
+            projectId: project.id,
+            taskExecutionId: executionId,
+            status: "completed",
+            verdict,
+            aggregateScore: verdict === "proceed" ? 90 : 50,
+            threshold: 75,
+            finishedAt: new Date(),
+          },
+        });
+        await prisma.taskExecution.update({
+          where: { id: executionId },
+          data: { lastEvalRunId: evalRun.id },
+        });
+        return prisma.evalRun.findUnique({
+          where: { id: evalRun.id },
+          include: { results: true },
+        });
+      },
+      listEvalRuns: async () => [],
+    };
+
+    const api = createApp({
+      prisma,
+      env: { VIMBUS_TEST_KEY: "present" },
+      evaluatorService: fakeEvaluator as never,
+    });
+
+    const execution = await runSmokeUntilPatchReady(api, prisma, tempDir, "PIPE-2", {
+      slotKeys: ["executor_default", "executor_strong"],
+    });
+
+    // Three runEvaluation calls: initial + retry + escalate, all on the same execution.
+    expect(evaluatorRunCalls).toHaveLength(3);
+    expect(evaluatorRunCalls.every((id) => id === execution.id)).toBe(true);
+
+    const finalExecution = await prisma.taskExecution.findUnique({
+      where: { id: execution.id },
+    });
+    expect(finalExecution?.retryCount).toBe(1);
+    expect(finalExecution?.escalationLevel).toBe(1);
+
+    const decisions = await prisma.modelDecision.findMany({
+      where: { taskExecutionId: execution.id },
+      orderBy: [{ attempt: "asc" }],
+    });
+    expect(decisions.map((d) => d.selectedSlot)).toEqual([
+      "executor_default",
+      "executor_default",
+      "executor_strong",
+    ]);
+
+    const events = await listEventTypes(api, execution);
+    expect(events).toContain("execution.retry.scheduled");
+    expect(events).toContain("execution.escalation.scheduled");
+    expect(events).toContain("execution.evaluated");
+  }, 60000);
+
+  test("evaluator failure logs evaluation.failed but leaves patch approvable", async () => {
+    const fakeEvaluator = {
+      runEvaluation: async () => {
+        throw new Error("synthetic evaluator failure");
+      },
+      listEvalRuns: async () => [],
+    };
+
+    const api = createApp({
+      prisma,
+      env: { VIMBUS_TEST_KEY: "present" },
+      evaluatorService: fakeEvaluator as never,
+    });
+
+    const execution = await runSmokeUntilPatchReady(api, prisma, tempDir, "PIPE-3");
+
+    const patchRef = await api.fetch(new Request(`http://localhost/executions/${execution.id}/patch`));
+    expect(patchRef.status).toBe(200);
+    const patch = await patchRef.json();
+    expect(patch.pipelineStatus).toBe("failed");
+    expect(patch.execution.status).toBe("patch_ready");
+
+    const approvePatchRef = await postJson(api, `/executions/${execution.id}/patch/approve`, {});
+    expect(approvePatchRef.status).toBe(200);
+
+    const events = await listEventTypes(api, execution);
+    expect(events).toContain("evaluation.failed");
+  }, 30000);
+});
+
+async function listEventTypes(
+  api: ReturnType<typeof createApp>,
+  execution: { task: { epic: { project: { id: string } } } },
+) {
+  const projectId = execution.task.epic.project.id;
+  const eventsRef = await api.fetch(new Request(`http://localhost/events?projectId=${projectId}`));
+  const events = (await eventsRef.json()) as Array<{ type: string }>;
+  return events.map((event) => event.type);
+}
+
+async function runSmokeUntilPatchReady(
+  api: ReturnType<typeof createApp>,
+  prismaClient: PrismaClient,
+  rootPath: string,
+  stableId: string,
+  modelOptions?: { slotKeys?: string[] },
+) {
+  const projectRef = await postJson(api, "/projects", {
+    name: `Pipeline Smoke ${stableId}`,
+    rootPath,
+    baseBranch: "main",
+  });
+  const project = await projectRef.json();
+
+  await postJson(api, `/mcp/setup?projectId=${project.id}`, { activate: true });
+
+  await postJson(api, "/model-setup", {
+    projectId: project.id,
+    providerKey: "openai",
+    providerKind: "openai",
+    providerStatus: "active",
+    secretEnv: "VIMBUS_TEST_KEY",
+    modelName: "GPT Smoke",
+    modelSlug: "gpt-smoke",
+    capabilities: ["json"],
+    slotKeys: modelOptions?.slotKeys ?? ["executor_default"],
+  });
+
+  const plannerRunRef = await postJson(api, "/planner/runs", {
+    projectId: project.id,
+    goal: "Pipeline smoke",
+    moduleName: "smoke",
+  });
+  const plannerRun = await plannerRunRef.json();
+
+  await postJson(api, `/planner/runs/${plannerRun.id}/answers`, {
+    answers: { scope: { in: ["packages"] }, verification: { required: ["smoke"] } },
+  });
+
+  await postJson(api, `/planner/runs/${plannerRun.id}/generate`, buildPipelineSmokeProposal(stableId));
+
+  await postJson(api, "/approvals", {
+    projectId: project.id,
+    subjectType: "planner_run",
+    subjectId: plannerRun.id,
+    stage: "planner_review",
+    status: "granted",
+    operator: "pipeline-test",
+  });
+
+  const tasksRef = await api.fetch(new Request(`http://localhost/tasks?projectId=${project.id}`));
+  const tasks = await tasksRef.json();
+  const task = tasks[0];
+
+  await postJson(api, `/tasks/${task.id}/verification/approve`, {
+    operator: "pipeline-test",
+    reason: "ok",
+  });
+
+  await postJson(api, `/tasks/${task.id}/branch`, {});
+
+  const executeRef = await postJson(api, `/tasks/${task.id}/execute`, {});
+  const execution = await executeRef.json();
+
+  writeProjectFile(rootPath, "README.md", "# pipeline\nsmoke patch\n");
+
+  const runTestsRef = await postJson(api, `/executions/${execution.id}/test-runs`, {});
+  expect(runTestsRef.status).toBe(200);
+
+  return execution;
+}
+
+function buildPipelineSmokeProposal(stableId: string) {
+  return {
+    summary: "Pipeline smoke",
+    epics: [
+      {
+        key: `${stableId}-EPIC`,
+        title: "Pipeline Smoke",
+        goal: "Drive the post-execution pipeline.",
+        orderIndex: 0,
+        acceptance: [{ label: "patch reaches patch_ready" }],
+        risks: [{ label: "deterministic" }],
+        tasks: [
+          {
+            stableId,
+            title: "Pipeline smoke task",
+            description: "Verify command produces expected README marker.",
+            type: "backend",
+            complexity: "medium",
+            orderIndex: 0,
+            acceptance: [{ label: "smoke marker visible" }],
+            targetFiles: ["README.md"],
+            requires: ["executor_default"],
+            verificationPlan: {
+              rationale: "Single deterministic command.",
+              items: [
+                {
+                  kind: "logic",
+                  runner: "custom",
+                  title: "README smoke marker present",
+                  description: "Check README contents.",
+                  command: buildReadmeSmokeCommand(),
+                  orderIndex: 0,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
 async function seedGeneratedPlannerRun(api: ReturnType<typeof createApp>, rootPath: string) {
   const projectRef = await postJson(api, "/projects", {
     name: "Foundation Project",

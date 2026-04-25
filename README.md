@@ -27,10 +27,9 @@ VimbusProMax3000 is a terminal-native, test-first, DB-backed execution system im
 
 ### Not Built Yet
 
-- HC-79 evaluation is Done in Jira and implemented on `origin/dev`, but it is not present on `main`; the next step is to land it on `main` or retarget/reopen the Jira state.
-- HC-80 visual verification, HC-81 benchmark/regression gates, and HC-82 optional LangSmith export remain separate Nikos-owned later-slice Jira work.
+- Full PDF page pixel-diff (HC-80 ships metadata + page-count + text-similarity diff today; rendered-page pixel diff is a follow-up).
 - Broader browser/database MCP wrappers and non-command evidence execution remain outside the current `main` slice.
-- Adaptive retry/escalation behavior remains blocked until evaluation is present on `main`.
+- Postgres hardening (the workspace is SQLite-only today).
 
 Playwright is supported today only when it is stored as a normal shell command inside a verification item, such as `pnpm playwright test` or `bunx playwright test`. It is not a special backend runtime in the current `main` slice.
 
@@ -119,11 +118,10 @@ Recommended follow-up reading:
 
 ## Roadmap / Next Slice
 
-- Resolve HC-79's split state: Jira marks evaluation Done and `origin/dev` contains the implementation, but `main` does not.
-- Keep HC-76 CLI console, HC-77 verification metadata, HC-78 MCP client/API, HC-91 wrapper gates, and HC-92 execution-loop smoke closed; do not duplicate those slices.
-- Sequence HC-80 visual verification, HC-81 benchmark/regression gates, and HC-82 LangSmith export as separate Nikos-owned later slices.
+- All HC-76 through HC-99 MVP slices are landed on `main`; do not duplicate them.
+- Soft-gate evaluator pipeline (auto-invoke + bounded retry/escalation + benchmarks/LangSmith auto-wire) ships in this slice; CLI surfaces verdict via `/patch:show` and `/evaluations:*` commands.
 - Use the canonical [MVP backlog dependency map](docs/execution/mvp-plan.md#backlog-dependency-map) for Jira link/order decisions.
-- Add retry and escalation behavior only after evaluation is present on `main` and the operator surfaces can explain the outcome.
+- Follow-ups: full PDF page pixel-diff, non-command evidence execution, broader browser/database MCP wrappers, Postgres hardening.
 
 ## Contribution / Repo Expectations
 

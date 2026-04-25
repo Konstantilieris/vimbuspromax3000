@@ -31,6 +31,8 @@ export type SetupSpawnFn = (
 
 export type SetupReadlineFn = (prompt: string) => Promise<string>;
 
+export type PlaywrightDetectFn = () => Promise<{ installed: boolean; reason?: string }>;
+
 export type SetupCommandOptions = {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
@@ -43,6 +45,7 @@ export type SetupCommandOptions = {
   configDir?: string;
   writeCredentials?: typeof writeClaudeCredentialsFile;
   discoverCredentials?: typeof discoverAnthropicCredentials;
+  detectPlaywright?: PlaywrightDetectFn;
 };
 
 type ParsedOptions = Record<string, string | undefined>;
@@ -94,6 +97,7 @@ export async function runSetupCommand(
   const spawnFn = commandOptions.spawn ?? defaultSpawn;
   const writeCreds = commandOptions.writeCredentials ?? writeClaudeCredentialsFile;
   const discoverCreds = commandOptions.discoverCredentials ?? discoverAnthropicCredentials;
+  const detectPlaywright = commandOptions.detectPlaywright ?? defaultDetectPlaywright;
   const credOpts = {
     env,
     homedir: commandOptions.homedir,
@@ -106,7 +110,7 @@ export async function runSetupCommand(
   };
 
   log(`${PRODUCT_NAME} setup wizard`);
-  log("Step 1/5: project");
+  log("Step 1/6: project");
 
   const project = await resolveProject({
     apiUrl,
@@ -121,7 +125,7 @@ export async function runSetupCommand(
 
   log(`Selected project ${project.name} (${project.id}) at ${project.rootPath}.`);
   log("");
-  log("Step 2/5: credentials");
+  log("Step 2/6: credentials");
 
   const credentials = await resolveCredentials({
     parsed,
@@ -138,23 +142,38 @@ export async function runSetupCommand(
   const setupEnv: NodeJS.ProcessEnv = { ...env, ANTHROPIC_API_KEY: credentials.apiKey };
 
   log("");
-  log("Step 3/5: models");
+  log("Step 3/6: models");
 
   await runModelsStep({ projectId: project.id, parsed, env: setupEnv, spawnFn, log });
 
   log("");
-  log("Step 4/5: mcp");
+  log("Step 4/6: mcp");
 
   await runMcpStep({ projectId: project.id, parsed, env: setupEnv, spawnFn, log });
 
   log("");
-  log("Step 5/5: health");
+  log("Step 5/6: playwright");
+
+  const playwrightOutcome = await runPlaywrightStep({
+    parsed,
+    env: setupEnv,
+    spawnFn,
+    detect: detectPlaywright,
+    isSmoke,
+    isTty,
+    ask,
+    log,
+  });
+
+  log("");
+  log("Step 6/6: health");
 
   const health = await runHealthCheck({
     apiUrl,
     request,
     projectId: project.id,
     credentialSource: credentials.source,
+    playwrightOutcome,
     log,
   });
 
@@ -335,11 +354,100 @@ async function runMcpStep(input: SubStepInput): Promise<void> {
   }
 }
 
+export type PlaywrightStepOutcome =
+  | { status: "skipped"; reason: string }
+  | { status: "already-installed" }
+  | { status: "installed" }
+  | { status: "failed"; reason: string };
+
+type PlaywrightStepInput = {
+  parsed: ParsedOptions;
+  env: NodeJS.ProcessEnv;
+  spawnFn: SetupSpawnFn;
+  detect: PlaywrightDetectFn;
+  isSmoke: boolean;
+  isTty: boolean;
+  ask: SetupReadlineFn;
+  log: (line: string) => void;
+};
+
+async function runPlaywrightStep(input: PlaywrightStepInput): Promise<PlaywrightStepOutcome> {
+  if (input.parsed["no-playwright"] === "true") {
+    input.log("Skipped (--no-playwright).");
+    return { status: "skipped", reason: "user-disabled" };
+  }
+
+  const detection = await input.detect();
+
+  if (detection.installed) {
+    input.log("Playwright Chromium already installed.");
+    return { status: "already-installed" };
+  }
+
+  const flag = input.parsed["install-playwright"] ?? "auto";
+  let proceed: boolean;
+
+  if (flag === "true") {
+    proceed = true;
+  } else if (flag === "false") {
+    input.log("Skipped (--install-playwright=false).");
+    return { status: "skipped", reason: "user-disabled" };
+  } else if (input.isSmoke || !input.isTty) {
+    input.log(`Skipped (non-interactive). Run "npx playwright install chromium" to enable visual verification.`);
+    return { status: "skipped", reason: "non-interactive" };
+  } else {
+    const reasonHint = detection.reason ? ` (${detection.reason})` : "";
+    const answer = (await input.ask(`Install Playwright Chromium for visual verification?${reasonHint} [Y/n]: `)).trim().toLowerCase();
+    proceed = answer === "" || answer === "y" || answer === "yes";
+  }
+
+  if (!proceed) {
+    input.log("Skipped (user declined).");
+    return { status: "skipped", reason: "user-declined" };
+  }
+
+  input.log("Installing Playwright Chromium...");
+  const result = await input.spawnFn("npx", ["playwright", "install", "chromium"], { env: input.env });
+
+  if (result.stdout.trim()) {
+    input.log(indent(result.stdout.trim()));
+  }
+
+  if (result.exitCode !== 0) {
+    const stderrFirstLine = result.stderr.split(/\r?\n/, 1)[0]?.trim() ?? "(no stderr)";
+    input.log(`Warning: Playwright install failed (exit ${result.exitCode}): ${stderrFirstLine}`);
+    return { status: "failed", reason: stderrFirstLine };
+  }
+
+  input.log("Playwright Chromium install complete.");
+  return { status: "installed" };
+}
+
+const defaultDetectPlaywright: PlaywrightDetectFn = async () => {
+  try {
+    // Dynamic, optional dependency — playwright-core lives in packages/verification.
+    const moduleName = "playwright-core";
+    const playwright = (await import(/* @vite-ignore */ moduleName)) as {
+      chromium?: { executablePath(): string };
+    };
+    const path = playwright.chromium?.executablePath();
+
+    if (!path) {
+      return { installed: false, reason: "playwright-core missing chromium" };
+    }
+
+    return { installed: true };
+  } catch (error) {
+    return { installed: false, reason: error instanceof Error ? error.message : "playwright-core not found" };
+  }
+};
+
 type HealthCheckInput = {
   apiUrl: string;
   request: typeof fetch;
   projectId: string;
   credentialSource: CredentialSource;
+  playwrightOutcome: PlaywrightStepOutcome;
   log: (line: string) => void;
 };
 
@@ -377,6 +485,7 @@ async function runHealthCheck(input: HealthCheckInput): Promise<{ ok: boolean; r
   input.log(`Credential source: ${input.credentialSource}`);
   input.log(`Slots assigned: ${assigned}/${total}`);
   input.log(`MCP servers: ${serverCount}`);
+  input.log(`Playwright: ${describePlaywrightOutcome(input.playwrightOutcome)}`);
 
   if (probes.length === 0) {
     input.log("MCP probes: none reported");
@@ -434,6 +543,19 @@ function buildMcpArgs(projectId: string, parsed: ParsedOptions): string[] {
   }
 
   return args;
+}
+
+function describePlaywrightOutcome(outcome: PlaywrightStepOutcome): string {
+  switch (outcome.status) {
+    case "installed":
+      return "installed";
+    case "already-installed":
+      return "already installed";
+    case "skipped":
+      return `skipped (${outcome.reason})`;
+    case "failed":
+      return `failed (${outcome.reason})`;
+  }
 }
 
 function indent(value: string, prefix = "  "): string {
