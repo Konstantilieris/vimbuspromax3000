@@ -52,6 +52,7 @@ export function isTestRunnerEligibilityError(error: unknown): error is TestRunne
 export type TestRunnerService = {
   runExecutionVerification(input: { executionId: string }): Promise<Awaited<ReturnType<typeof listTestRuns>>>;
   listExecutionTestRuns(executionId: string): Promise<Awaited<ReturnType<typeof listTestRuns>>>;
+  setOnExecutionVerified(handler: ((input: { executionId: string }) => Promise<void> | void) | null): void;
 };
 
 type CommandRunnerInput = {
@@ -77,11 +78,16 @@ type VerificationRunItem = NonNullable<ExecutionVerificationContext["latestAppro
 export function createTestRunnerService(options: {
   prisma: PrismaClient;
   commandRunner?: (input: CommandRunnerInput) => CommandRunnerResult;
+  onExecutionVerified?: ((input: { executionId: string }) => Promise<void> | void) | null;
 }): TestRunnerService {
   const prisma = options.prisma;
   const commandRunner = options.commandRunner ?? runCapturedCommand;
+  let onExecutionVerified = options.onExecutionVerified ?? null;
 
   return {
+    setOnExecutionVerified(handler) {
+      onExecutionVerified = handler;
+    },
     async listExecutionTestRuns(executionId) {
       await requireExecutionContext(prisma, executionId);
       return listTestRuns(prisma, {
@@ -350,6 +356,16 @@ export function createTestRunnerService(options: {
           },
         });
       });
+
+      if (onExecutionVerified) {
+        try {
+          await onExecutionVerified({ executionId: execution.id });
+        } catch (error) {
+          // Pipeline failures must not break the patch-review handoff.
+          // The pipeline persists its own loop events for failures.
+          console.error("post-execution pipeline error:", error instanceof Error ? error.stack : error);
+        }
+      }
 
       return listTestRuns(prisma, {
         taskExecutionId: execution.id,

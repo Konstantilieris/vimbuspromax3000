@@ -6,7 +6,7 @@ This file is the canonical MVP tracker. Keep it current whenever implementation 
 
 ## Current Position
 
-Status: **CLI, verification, MCP, wrapper gates, execution-loop smoke, evaluation gate, visual verification runtime, and onboarding wizard are complete on `main`; benchmark/regression and LangSmith later-slice tickets remain open in Jira**.
+Status: **All HC-76..HC-99 MVP slices are complete on `main`. Soft-gate evaluator pipeline (auto-invoke after verification + bounded retry/escalation + benchmarks/LangSmith auto-wire), CLI evaluation surface, and Playwright auto-install in setup wizard now ship on `main`. VIM-6 and VIM-7 remain in Jira as review placeholders.**
 
 Completed foundations:
 
@@ -136,11 +136,15 @@ Legend: `done`, `active`, `next`, `later`.
 
 ## Recommended Next Sequence
 
-1. Run `bun install` from repo root to reconcile lockfile after the HC-80 visual deps were added (`playwright-core`, `pixelmatch`, `pngjs`, `pdfjs-dist`).
-2. Optional: `npx playwright install chromium` once if HC-80 screenshot capture is exercised; tests run without it.
-3. Have Nikos review HC-81 (benchmarks) and HC-82 (LangSmith) implementations and close the tickets if scope matches expectations.
-4. Add retry/escalation behavior on top of the evaluator verdicts now that the gate is present on `main`.
-5. Follow-up slices: full pixel-diff of rendered PDF pages, Playwright browser auto-install, Postgres hardening.
+1. Have Nikos review VIM-6 (benchmarks) and VIM-7 (LangSmith) auto-wire integrations and close the tickets.
+2. Follow-up slices: full pixel-diff of rendered PDF pages, non-command evidence runtime, Postgres hardening, broader browser/database MCP wrappers.
+
+Closed in this slice:
+
+- Auto-pipeline after verification: evaluator → (if proceed) benchmarks + LangSmith export, soft gate.
+- Bounded retry/escalation state machine on evaluator verdicts (`Project.autoRetryConfigJson` + env `VIMBUS_MAX_AUTO_RETRY_ATTEMPTS` knobs).
+- CLI verdict visibility: `/patch:show` shows latest evaluation; `/evaluations`, `/evaluations:show`, `/evaluations:run` commands ship in `apps/cli/src/execution.ts`.
+- Setup wizard step 5/6 detects and offers to install Playwright Chromium; non-blocking on failure.
 
 ## Backlog Dependency Map
 

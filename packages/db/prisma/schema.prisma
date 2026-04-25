@@ -13,6 +13,7 @@ model Project {
   rootPath     String
   baseBranch   String   @default("main")
   branchNaming String   @default("tg/<module>/<task-id>-<slug>")
+  autoRetryConfigJson String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -231,15 +232,17 @@ model TaskBranch {
 }
 
 model TaskExecution {
-  id          String    @id @default(cuid())
-  taskId      String
-  branchId    String
-  status      String
-  retryCount  Int       @default(0)
-  policyJson  String?
-  startedAt   DateTime?
-  finishedAt  DateTime?
-  createdAt   DateTime  @default(now())
+  id              String    @id @default(cuid())
+  taskId          String
+  branchId        String
+  status          String
+  retryCount      Int       @default(0)
+  escalationLevel Int       @default(0)
+  lastEvalRunId   String?
+  policyJson      String?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  createdAt       DateTime  @default(now())
 
   task         Task          @relation(fields: [taskId], references: [id])
   branch       TaskBranch    @relation(fields: [branchId], references: [id])
@@ -250,6 +253,7 @@ model TaskExecution {
   visualResults VisualVerificationResult[]
 
   @@index([taskId, status])
+  @@index([lastEvalRunId])
 }
 
 model AgentStep {

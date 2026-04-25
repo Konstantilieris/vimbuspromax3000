@@ -7,51 +7,224 @@ import {
   createModelDecision,
   createTaskExecution,
   createTaskBranch,
+  getEvalRunDetail,
   getLatestPatchReview,
   getTaskBranch,
   getTaskBranchDetail,
   getTaskExecutionContext,
   getTaskExecutionDetail,
+  listEvalRunsForExecution,
+  listLangSmithTraceLinks,
   setTaskStatus,
   updatePatchReview,
   updateTaskBranch,
   updateTaskExecution,
 } from "@vimbuspromax3000/db";
 import { createMcpService } from "@vimbuspromax3000/mcp-client";
-import { resolveModelSlot } from "@vimbuspromax3000/policy-engine";
+import { nextExecutorSlot, resolveModelSlot } from "@vimbuspromax3000/policy-engine";
+import type { ModelSlotKey } from "@vimbuspromax3000/shared";
+import {
+  runPostExecutionPipeline,
+  type BenchmarkRunSummary,
+  type EvalDecision,
+  type EvalRunSummary,
+  type PostExecutionPipelineDeps,
+  type PostExecutionPipelineResult,
+} from "./post-execution-pipeline";
+
+export type EvaluationDimensionSummary = {
+  dimension: string;
+  score: number;
+  threshold: number;
+  verdict: string;
+  reasoning: string;
+};
+
+export type LatestEvaluationSummary = {
+  evalRunId: string;
+  status: string;
+  decision: EvalDecision | null;
+  aggregateScore: number | null;
+  threshold: number | null;
+  finishedAt: Date | null;
+  hardFailDimensions: string[];
+  dimensions: EvaluationDimensionSummary[];
+  benchmarkSummaries: Array<{
+    scenarioId: string | null;
+    scenarioName: string | null;
+    verdict: string | null;
+    aggregateScore: number | null;
+  }>;
+  langSmithTraceUrl: string | null;
+};
+
+export type PipelineStatus = "pending" | "running" | "completed" | "failed" | "skipped";
+
+export type ExecutionPatchReviewResult = {
+  patchReview: NonNullable<Awaited<ReturnType<typeof getLatestPatchReview>>>;
+  execution: NonNullable<Awaited<ReturnType<typeof getTaskExecutionDetail>>>;
+  latestEvaluation: LatestEvaluationSummary | null;
+  pipelineStatus: PipelineStatus;
+};
+
+export type ExecutionPipelineRunner = (input: { executionId: string }) => Promise<PostExecutionPipelineResult | null>;
 
 export type ExecutionService = {
   getTaskBranch(taskId: string): Promise<Awaited<ReturnType<typeof getTaskBranchDetail>>>;
   prepareTaskBranch(input: { taskId: string }): Promise<Awaited<ReturnType<typeof getTaskBranchDetail>>>;
   abandonTaskBranch(input: { taskId: string }): Promise<Awaited<ReturnType<typeof getTaskBranchDetail>>>;
   startTaskExecution(input: { taskId: string }): Promise<Awaited<ReturnType<typeof getTaskExecutionDetail>>>;
-  getExecutionPatchReview(
-    executionId: string,
-  ): Promise<{
-    patchReview: NonNullable<Awaited<ReturnType<typeof getLatestPatchReview>>>;
-    execution: NonNullable<Awaited<ReturnType<typeof getTaskExecutionDetail>>>;
-  } | null>;
-  approveExecutionPatchReview(
-    executionId: string,
-  ): Promise<{
-    patchReview: NonNullable<Awaited<ReturnType<typeof getLatestPatchReview>>>;
-    execution: NonNullable<Awaited<ReturnType<typeof getTaskExecutionDetail>>>;
-  }>;
-  rejectExecutionPatchReview(
-    executionId: string,
-  ): Promise<{
-    patchReview: NonNullable<Awaited<ReturnType<typeof getLatestPatchReview>>>;
-    execution: NonNullable<Awaited<ReturnType<typeof getTaskExecutionDetail>>>;
-  }>;
+  getExecutionPatchReview(executionId: string): Promise<ExecutionPatchReviewResult | null>;
+  approveExecutionPatchReview(executionId: string): Promise<ExecutionPatchReviewResult>;
+  rejectExecutionPatchReview(executionId: string): Promise<ExecutionPatchReviewResult>;
+  runPostExecutionPipeline: ExecutionPipelineRunner;
 };
 
-export function createExecutionService(options: {
+export type ExecutionServiceOptions = {
   prisma: PrismaClient;
   env?: Record<string, string | undefined>;
-}): ExecutionService {
+  evaluator?: {
+    runEvaluation: (executionId: string) => Promise<unknown>;
+  };
+  benchmarkRunner?: PostExecutionPipelineDeps["runBenchmarkScenario"];
+  langSmithExporter?: PostExecutionPipelineDeps["exportLangSmith"];
+  restartVerification?: (input: { executionId: string }) => Promise<unknown>;
+  pipelineConfig?: {
+    maxRetries?: number;
+    maxEscalations?: number;
+  };
+};
+
+export function createExecutionService(options: ExecutionServiceOptions): ExecutionService {
   const prisma = options.prisma;
   const env = options.env ?? process.env;
   const mcpService = createMcpService({ prisma });
+  const envMaxRetries = parsePositiveInt(env.VIMBUS_MAX_AUTO_RETRY_ATTEMPTS);
+  const envMaxEscalations = parsePositiveInt(env.VIMBUS_MAX_AUTO_ESCALATION_ATTEMPTS);
+
+  type AttemptInput = {
+    executionId: string;
+    taskId: string;
+    projectId: string;
+    complexity: string;
+    branchId: string;
+    rootPath: string;
+    slotKey: ModelSlotKey;
+    attempt: number;
+    reason: string;
+    startedAt: Date;
+    emitTaskSelected: { branchName: string } | null;
+    markBranchActive: boolean;
+  };
+
+  async function startExecutorAttempt(input: AttemptInput): Promise<void> {
+    const resolution = await resolveModelSlot(
+      prisma,
+      {
+        projectId: input.projectId,
+        slotKey: input.slotKey,
+        taskExecutionId: input.executionId,
+      },
+      env,
+    );
+
+    if (!resolution.ok) {
+      await prisma.$transaction(async (tx) => {
+        await updateTaskExecution(tx, input.executionId, {
+          status: "failed",
+          finishedAt: new Date(),
+        });
+        await setTaskStatus(tx, input.taskId, "failed");
+        await appendLoopEvent(tx, {
+          projectId: input.projectId,
+          taskExecutionId: input.executionId,
+          type: "task.failed",
+          payload: {
+            taskId: input.taskId,
+            code: resolution.code,
+            message: resolution.message,
+          },
+        });
+      });
+
+      throw new Error(`Execution model resolution failed: ${resolution.message}`);
+    }
+
+    const policyJson = JSON.stringify({
+      modelResolution: resolution.value,
+    });
+
+    await prisma.$transaction(async (tx) => {
+      await updateTaskExecution(tx, input.executionId, {
+        status: "implementing",
+        policyJson,
+        startedAt: input.startedAt,
+      });
+      if (input.markBranchActive) {
+        await updateTaskBranch(tx, input.branchId, {
+          state: "active",
+          currentHead: getHeadCommit(input.rootPath),
+        });
+      }
+      await setTaskStatus(tx, input.taskId, "executing");
+      await createModelDecision(tx, {
+        projectId: input.projectId,
+        taskExecutionId: input.executionId,
+        attempt: input.attempt,
+        complexityLabel: input.complexity,
+        selectedSlot: input.slotKey,
+        selectedModel: resolution.value.concreteModelName,
+        reason: input.reason,
+        state: "selected",
+      });
+      const agentStep = await createAgentStep(tx, {
+        taskExecutionId: input.executionId,
+        role: "executor",
+        modelName: resolution.value.concreteModelName,
+        status: "started",
+        startedAt: input.startedAt,
+        summary:
+          input.attempt === 1
+            ? "Minimal execution backend started."
+            : `Executor attempt ${input.attempt} (${input.slotKey}).`,
+      });
+
+      if (input.emitTaskSelected) {
+        await appendLoopEvent(tx, {
+          projectId: input.projectId,
+          taskExecutionId: input.executionId,
+          type: "task.selected",
+          payload: {
+            taskId: input.taskId,
+            branchName: input.emitTaskSelected.branchName,
+          },
+        });
+      }
+
+      await appendLoopEvent(tx, {
+        projectId: input.projectId,
+        taskExecutionId: input.executionId,
+        type: "model.selected",
+        payload: {
+          taskId: input.taskId,
+          slotKey: input.slotKey,
+          selectedModel: resolution.value.concreteModelName,
+          attempt: input.attempt,
+        },
+      });
+      await appendLoopEvent(tx, {
+        projectId: input.projectId,
+        taskExecutionId: input.executionId,
+        type: "agent.step.started",
+        payload: {
+          taskId: input.taskId,
+          agentStepId: agentStep.id,
+          role: "executor",
+          modelName: resolution.value.concreteModelName,
+        },
+      });
+    });
+  }
 
   return {
     async getTaskBranch(taskId) {
@@ -199,103 +372,19 @@ export function createExecutionService(options: {
         startedAt,
       });
 
-      const resolution = await resolveModelSlot(
-        prisma,
-        {
-          projectId: project.id,
-          slotKey: "executor_default",
-          taskExecutionId: execution.id,
-        },
-        env,
-      );
-
-      if (!resolution.ok) {
-        await prisma.$transaction(async (tx) => {
-          await updateTaskExecution(tx, execution.id, {
-            status: "failed",
-            finishedAt: new Date(),
-          });
-          await setTaskStatus(tx, context.id, "failed");
-          await appendLoopEvent(tx, {
-            projectId: project.id,
-            taskExecutionId: execution.id,
-            type: "task.failed",
-            payload: {
-              taskId: context.id,
-              code: resolution.code,
-              message: resolution.message,
-            },
-          });
-        });
-
-        throw new Error(`Execution model resolution failed: ${resolution.message}`);
-      }
-
-      const policyJson = JSON.stringify({
-        modelResolution: resolution.value,
-      });
-
-      await prisma.$transaction(async (tx) => {
-        await updateTaskExecution(tx, execution.id, {
-          status: "implementing",
-          policyJson,
-          startedAt,
-        });
-        await updateTaskBranch(tx, branch.id, {
-          state: "active",
-          currentHead: getHeadCommit(project.rootPath),
-        });
-        await setTaskStatus(tx, context.id, "executing");
-        await createModelDecision(tx, {
-          projectId: project.id,
-          taskExecutionId: execution.id,
-          attempt: 1,
-          complexityLabel: context.complexity,
-          selectedSlot: "executor_default",
-          selectedModel: resolution.value.concreteModelName,
-          reason: "Execution started for approved task.",
-          state: "selected",
-        });
-        const agentStep = await createAgentStep(tx, {
-          taskExecutionId: execution.id,
-          role: "executor",
-          modelName: resolution.value.concreteModelName,
-          status: "started",
-          startedAt,
-          summary: "Minimal execution backend started.",
-        });
-
-        await appendLoopEvent(tx, {
-          projectId: project.id,
-          taskExecutionId: execution.id,
-          type: "task.selected",
-          payload: {
-            taskId: context.id,
-            branchName: branch.name,
-          },
-        });
-        await appendLoopEvent(tx, {
-          projectId: project.id,
-          taskExecutionId: execution.id,
-          type: "model.selected",
-          payload: {
-            taskId: context.id,
-            slotKey: "executor_default",
-            selectedModel: resolution.value.concreteModelName,
-            attempt: 1,
-          },
-        });
-        await appendLoopEvent(tx, {
-          projectId: project.id,
-          taskExecutionId: execution.id,
-          type: "agent.step.started",
-          payload: {
-            taskId: context.id,
-            agentStepId: agentStep.id,
-            role: "executor",
-            modelName: resolution.value.concreteModelName,
-          },
-        });
+      await startExecutorAttempt({
+        executionId: execution.id,
+        taskId: context.id,
+        projectId: project.id,
+        complexity: context.complexity,
+        branchId: branch.id,
+        rootPath: project.rootPath,
+        slotKey: "executor_default",
+        attempt: 1,
+        reason: "Execution started for approved task.",
+        startedAt,
+        emitTaskSelected: { branchName: branch.name },
+        markBranchActive: true,
       });
 
       const detail = await getTaskExecutionDetail(prisma, execution.id);
@@ -305,6 +394,74 @@ export function createExecutionService(options: {
       }
 
       return detail;
+    },
+
+    async runPostExecutionPipeline({ executionId }) {
+      if (!options.evaluator) {
+        return null;
+      }
+
+      const execution = await getTaskExecutionDetail(prisma, executionId);
+
+      if (!execution) {
+        return null;
+      }
+
+      const projectId = execution.task.epic.project.id;
+      const currentSlotKey: ModelSlotKey =
+        execution.escalationLevel === 0 ? "executor_default" : "executor_strong";
+      const next = nextExecutorSlot(currentSlotKey);
+      const attempt = (execution.retryCount ?? 0) + (execution.escalationLevel ?? 0) + 1;
+
+      const deps: PostExecutionPipelineDeps = {
+        prisma,
+        runEvaluation: async (id) => extractEvalSummary(await options.evaluator!.runEvaluation(id)),
+        retryExecutor: async ({ slotKey, attempt: nextAttempt, reason }) => {
+          await applyRetryStateUpdate(prisma, {
+            executionId,
+            taskId: execution.task.id,
+            reason,
+          });
+
+          await startExecutorAttempt({
+            executionId,
+            taskId: execution.task.id,
+            projectId,
+            complexity: execution.task.complexity,
+            branchId: execution.branch.id,
+            rootPath: execution.task.epic.project.rootPath,
+            slotKey,
+            attempt: nextAttempt,
+            reason:
+              reason === "retry"
+                ? "Auto-retry triggered by evaluator verdict."
+                : "Auto-escalation triggered by evaluator verdict.",
+            startedAt: new Date(),
+            emitTaskSelected: null,
+            markBranchActive: false,
+          });
+
+          if (options.restartVerification) {
+            await options.restartVerification({ executionId });
+          }
+        },
+        runBenchmarkScenario: options.benchmarkRunner,
+        exportLangSmith: options.langSmithExporter,
+      };
+
+      return runPostExecutionPipeline(deps, {
+        executionId,
+        projectId,
+        retryCount: execution.retryCount ?? 0,
+        escalationLevel: execution.escalationLevel ?? 0,
+        attempt,
+        currentSlotKey,
+        nextSlotKey: next,
+        config: resolvePipelineConfig(prisma, execution, options.pipelineConfig, {
+          envMaxRetries,
+          envMaxEscalations,
+        }),
+      });
     },
 
     async getExecutionPatchReview(executionId) {
@@ -320,9 +477,14 @@ export function createExecutionService(options: {
         return null;
       }
 
+      const latestEvaluation = await loadLatestEvaluation(prisma, execution);
+      const pipelineStatus = await derivePipelineStatus(prisma, executionId);
+
       return {
         patchReview,
         execution,
+        latestEvaluation,
+        pipelineStatus,
       };
     },
 
@@ -371,9 +533,14 @@ export function createExecutionService(options: {
         throw new Error(`Patch review ${execution.patchReview.id} was not found after approval.`);
       }
 
+      const latestEvaluation = await loadLatestEvaluation(prisma, updatedExecution);
+      const pipelineStatus = await derivePipelineStatus(prisma, executionId);
+
       return {
         patchReview: updatedPatchReview,
         execution: updatedExecution,
+        latestEvaluation,
+        pipelineStatus,
       };
     },
 
@@ -409,12 +576,241 @@ export function createExecutionService(options: {
         throw new Error(`Patch review ${execution.patchReview.id} was not found after rejection.`);
       }
 
+      const latestEvaluation = await loadLatestEvaluation(prisma, updatedExecution);
+      const pipelineStatus = await derivePipelineStatus(prisma, executionId);
+
       return {
         patchReview: updatedPatchReview,
         execution: updatedExecution,
+        latestEvaluation,
+        pipelineStatus,
       };
     },
   };
+}
+
+type EvalRunDetailResult = NonNullable<Awaited<ReturnType<typeof getEvalRunDetail>>>;
+type TaskExecutionDetail = NonNullable<Awaited<ReturnType<typeof getTaskExecutionDetail>>>;
+
+function extractEvalSummary(value: unknown): EvalRunSummary | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as EvalRunDetailResult;
+
+  if (typeof candidate.id !== "string") {
+    return null;
+  }
+
+  const decision = (candidate.verdict ?? null) as EvalDecision | null;
+  const aggregateScore = candidate.aggregateScore ?? 0;
+  const threshold = candidate.threshold ?? null;
+  const results = candidate.results ?? [];
+  const hardFailDimensions = results
+    .filter((result) => result.verdict === "fail" && isHardFailDimension(result.dimension))
+    .map((result) => result.dimension);
+
+  return {
+    id: candidate.id,
+    decision: (decision ?? "fail") as EvalDecision,
+    aggregateScore,
+    threshold,
+    hardFailDimensions,
+  };
+}
+
+function isHardFailDimension(dimension: string): boolean {
+  return ["outcome_correctness", "security_policy_compliance", "verification_quality"].includes(dimension);
+}
+
+async function applyRetryStateUpdate(
+  prisma: PrismaClient,
+  input: {
+    executionId: string;
+    taskId: string;
+    reason: "retry" | "escalate";
+  },
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const current = await tx.taskExecution.findUnique({ where: { id: input.executionId } });
+
+    if (!current) {
+      throw new Error(`Task execution ${input.executionId} was not found while preparing retry state.`);
+    }
+
+    const retryCount = (current.retryCount ?? 0) + (input.reason === "retry" ? 1 : 0);
+    const escalationLevel = (current.escalationLevel ?? 0) + (input.reason === "escalate" ? 1 : 0);
+
+    await updateTaskExecution(tx, input.executionId, {
+      status: "implementing",
+      retryCount,
+      escalationLevel,
+      finishedAt: null,
+    });
+
+    await setTaskStatus(tx, input.taskId, "executing");
+
+    const latestPlan = await tx.verificationPlan.findFirst({
+      where: { taskId: input.taskId, status: "approved" },
+      orderBy: [{ createdAt: "desc" }],
+    });
+
+    if (latestPlan) {
+      await tx.verificationItem.updateMany({
+        where: { planId: latestPlan.id },
+        data: { status: "approved" },
+      });
+    }
+  });
+}
+
+function resolvePipelineConfig(
+  _prisma: PrismaClient,
+  execution: TaskExecutionDetail,
+  optionConfig: ExecutionServiceOptions["pipelineConfig"],
+  envFloors: { envMaxRetries: number | null; envMaxEscalations: number | null },
+): { maxRetries: number; maxEscalations: number } {
+  const projectConfig = parseAutoRetryConfig(execution.task.epic.project.autoRetryConfigJson);
+  const maxRetries =
+    projectConfig?.maxRetries ?? optionConfig?.maxRetries ?? envFloors.envMaxRetries ?? 1;
+  const maxEscalations =
+    projectConfig?.maxEscalations ?? optionConfig?.maxEscalations ?? envFloors.envMaxEscalations ?? 1;
+
+  return { maxRetries, maxEscalations };
+}
+
+function parseAutoRetryConfig(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(value);
+
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const cast = parsed as Record<string, unknown>;
+      const maxRetries = typeof cast.maxRetries === "number" ? cast.maxRetries : undefined;
+      const maxEscalations = typeof cast.maxEscalations === "number" ? cast.maxEscalations : undefined;
+
+      return { maxRetries, maxEscalations };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function parsePositiveInt(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
+async function loadLatestEvaluation(
+  prisma: PrismaClient,
+  execution: TaskExecutionDetail,
+): Promise<LatestEvaluationSummary | null> {
+  let evalRun: EvalRunDetailResult | null = null;
+
+  if (execution.lastEvalRunId) {
+    evalRun = await getEvalRunDetail(prisma, execution.lastEvalRunId);
+  }
+
+  if (!evalRun) {
+    const runs = await listEvalRunsForExecution(prisma, execution.id);
+    evalRun = runs.find((run) => run.benchmarkScenarioId === null) ?? null;
+  }
+
+  if (!evalRun) {
+    return null;
+  }
+
+  const benchmarkRuns = await prisma.evalRun.findMany({
+    where: {
+      taskExecutionId: execution.id,
+      benchmarkScenarioId: { not: null },
+    },
+    orderBy: [{ createdAt: "desc" }],
+  });
+
+  const scenarioIds = benchmarkRuns
+    .map((run) => run.benchmarkScenarioId)
+    .filter((id): id is string => Boolean(id));
+
+  const scenarios = scenarioIds.length
+    ? await prisma.benchmarkScenario.findMany({ where: { id: { in: scenarioIds } } })
+    : [];
+
+  const scenarioById = new Map(scenarios.map((scenario) => [scenario.id, scenario.name]));
+
+  const langSmithLinks = await listLangSmithTraceLinks(prisma, {
+    projectId: execution.task.epic.project.id,
+    subjectType: "task_execution",
+    subjectId: execution.id,
+  });
+
+  const exportedLink =
+    langSmithLinks.find((link) => link.syncStatus === "exported") ??
+    langSmithLinks.find((link) => link.traceUrl !== null) ??
+    null;
+
+  return {
+    evalRunId: evalRun.id,
+    status: evalRun.status,
+    decision: (evalRun.verdict ?? null) as EvalDecision | null,
+    aggregateScore: evalRun.aggregateScore ?? null,
+    threshold: evalRun.threshold ?? null,
+    finishedAt: evalRun.finishedAt ?? null,
+    hardFailDimensions: (evalRun.results ?? [])
+      .filter((result) => result.verdict === "fail" && isHardFailDimension(result.dimension))
+      .map((result) => result.dimension),
+    dimensions: (evalRun.results ?? []).map((result) => ({
+      dimension: result.dimension,
+      score: result.score,
+      threshold: result.threshold,
+      verdict: result.verdict,
+      reasoning: result.reasoning,
+    })),
+    benchmarkSummaries: benchmarkRuns.map((run) => ({
+      scenarioId: run.benchmarkScenarioId,
+      scenarioName: run.benchmarkScenarioId ? scenarioById.get(run.benchmarkScenarioId) ?? null : null,
+      verdict: run.verdict,
+      aggregateScore: run.aggregateScore,
+    })),
+    langSmithTraceUrl: exportedLink?.traceUrl ?? null,
+  };
+}
+
+async function derivePipelineStatus(prisma: PrismaClient, executionId: string): Promise<PipelineStatus> {
+  const rows = await prisma.loopEvent.findMany({
+    where: { taskExecutionId: executionId },
+    orderBy: [{ createdAt: "asc" }],
+  });
+  let status: PipelineStatus = "pending";
+
+  for (const event of rows) {
+    if (event.type === "patch.ready") {
+      status = "running";
+    } else if (event.type === "execution.evaluated") {
+      status = "completed";
+    } else if (event.type === "evaluation.failed" || event.type === "execution.retry.failed") {
+      status = "failed";
+    } else if (event.type === "execution.retry.scheduled" || event.type === "execution.escalation.scheduled") {
+      status = "running";
+    }
+  }
+
+  return status;
 }
 
 async function requireReadyTaskContext(prisma: PrismaClient, taskId: string) {

@@ -66,6 +66,12 @@ import {
 } from "@vimbuspromax3000/mcp-client";
 import { createEvaluatorService, EvaluatorError, type EvaluatorService } from "@vimbuspromax3000/evaluator";
 import {
+  createLangSmithExporter,
+  exportLangSmithTraceNonBlocking,
+  langSmithExporterConfigFromEnv,
+  type LangSmithExporter,
+} from "@vimbuspromax3000/observability";
+import {
   assignSlot,
   createModel,
   createProvider,
@@ -130,6 +136,7 @@ export type ApiAppOptions = {
   executionService?: ExecutionService;
   testRunnerService?: TestRunnerService;
   evaluatorService?: EvaluatorService;
+  langSmithExporter?: LangSmithExporter;
 };
 
 export function createApp(options: ApiAppOptions = {}) {
@@ -137,10 +144,141 @@ export function createApp(options: ApiAppOptions = {}) {
   const prisma = options.prisma ?? createPrismaClient();
   const env = options.env ?? process.env;
   const plannerService = options.plannerService ?? createPlannerService({ prisma, env });
-  const executionService = options.executionService ?? createExecutionService({ prisma, env });
-  const testRunnerService = options.testRunnerService ?? createTestRunnerService({ prisma });
-  const mcpService = createMcpService({ prisma });
   const evaluatorService = options.evaluatorService ?? createEvaluatorService({ prisma, env });
+  const langSmithExporter =
+    options.langSmithExporter ??
+    createLangSmithExporter(langSmithExporterConfigFromEnv(env));
+
+  const benchmarkRunner = async (input: {
+    executionId: string;
+    scenario: { id: string; name: string; goal: string };
+  }) => {
+    const scenarioRecord = await getBenchmarkScenario(prisma, input.scenario.id);
+
+    if (!scenarioRecord) {
+      throw new Error(`Benchmark scenario ${input.scenario.id} was not found.`);
+    }
+
+    const execution = await getTaskExecutionDetail(prisma, input.executionId);
+
+    if (!execution) {
+      throw new Error(`Task execution ${input.executionId} was not found.`);
+    }
+
+    const projectId = execution.task.epic.project.id;
+    const toolCalls = await loadBenchmarkToolCalls(prisma, {
+      projectId,
+      taskExecutionId: input.executionId,
+    });
+    const verificationItems: BenchmarkVerificationItemResult[] = (
+      execution.latestVerificationPlan?.items ?? []
+    ).map((item) => ({
+      name: item.title,
+      status:
+        item.status === "green"
+          ? "passed"
+          : item.status === "failed"
+            ? "failed"
+            : item.status === "running"
+              ? "blocked"
+              : "skipped",
+    }));
+    const run = scoreBenchmarkRun(toBenchmarkScenarioContract(scenarioRecord), {
+      scenarioId: scenarioRecord.id,
+      runId: crypto.randomUUID(),
+      toolCalls,
+      verificationItems,
+      retryCount: execution.retryCount ?? 0,
+    });
+    const evalRun = await persistBenchmarkEvalRun(prisma, projectId, run, {
+      taskExecutionId: input.executionId,
+    });
+
+    await appendLoopEvent(prisma, {
+      projectId,
+      taskExecutionId: input.executionId,
+      type: "benchmark.finished",
+      payload: {
+        benchmarkScenarioId: scenarioRecord.id,
+        evalRunId: evalRun.id,
+        aggregateScore: run.aggregateScore,
+        verdict: run.verdict,
+      },
+    });
+
+    return {
+      scenarioId: scenarioRecord.id,
+      scenarioName: scenarioRecord.name,
+      evalRunId: evalRun.id,
+      verdict: run.verdict,
+      aggregateScore: run.aggregateScore,
+    };
+  };
+
+  const exportLangSmithForExecution = async (input: {
+    executionId: string;
+    projectId: string;
+    evalRunId: string;
+    benchmarkRunIds: string[];
+  }) => {
+    if (!langSmithExporter.enabled) {
+      return { accepted: false, skipped: true, reason: "disabled" as const };
+    }
+
+    const link = await createLangSmithTraceLink(prisma, {
+      projectId: input.projectId,
+      subjectType: "task_execution",
+      subjectId: input.executionId,
+      syncStatus: "pending",
+    });
+
+    const result = exportLangSmithTraceNonBlocking(
+      langSmithExporter,
+      {
+        runName: `execution:${input.executionId}`,
+        subjectType: "task_execution",
+        subjectId: input.executionId,
+        metadata: {
+          evalRunId: input.evalRunId,
+          benchmarkRunIds: input.benchmarkRunIds,
+        },
+      },
+      (error) => {
+        // Non-blocking: just log; the link record stays in 'pending' state for the operator to retry.
+        console.error("langsmith export error:", error);
+      },
+    );
+
+    if (result.accepted) {
+      await updateLangSmithTraceLink(prisma, link.id, { syncStatus: "exported" });
+    }
+
+    return result;
+  };
+
+  const testRunnerService =
+    options.testRunnerService ??
+    createTestRunnerService({
+      prisma,
+    });
+  const executionService =
+    options.executionService ??
+    createExecutionService({
+      prisma,
+      env,
+      evaluator: evaluatorService,
+      benchmarkRunner,
+      langSmithExporter: exportLangSmithForExecution,
+      restartVerification: async (input) => {
+        await testRunnerService.runExecutionVerification(input);
+      },
+    });
+
+  testRunnerService.setOnExecutionVerified(async ({ executionId }) => {
+    await executionService.runPostExecutionPipeline({ executionId });
+  });
+
+  const mcpService = createMcpService({ prisma });
 
   app.onError((error, context) =>
     context.json(

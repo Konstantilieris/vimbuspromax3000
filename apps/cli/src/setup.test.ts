@@ -131,13 +131,16 @@ describe("Setup wizard happy path", () => {
       isSmoke: true,
       isTty: false,
       configDir: tempDir,
+      detectPlaywright: async () => ({ installed: false }),
     });
 
-    expect(output).toContain("Step 1/5: project");
-    expect(output).toContain("Step 2/5: credentials");
-    expect(output).toContain("Step 3/5: models");
-    expect(output).toContain("Step 4/5: mcp");
-    expect(output).toContain("Step 5/5: health");
+    expect(output).toContain("Step 1/6: project");
+    expect(output).toContain("Step 2/6: credentials");
+    expect(output).toContain("Step 3/6: models");
+    expect(output).toContain("Step 4/6: mcp");
+    expect(output).toContain("Step 5/6: playwright");
+    expect(output).toContain("Step 6/6: health");
+    expect(output).toContain("Playwright:");
     expect(output).toContain("Found Anthropic API key from env");
     expect(output).toContain("Credential source: env");
     expect(output).toContain("Slots assigned: 5/5");
@@ -206,10 +209,12 @@ describe("Setup wizard happy path", () => {
       isSmoke: true,
       isTty: false,
       configDir: tempDir,
+      detectPlaywright: async () => ({ installed: true }),
     });
 
     expect(output).toContain("Found Anthropic API key from claude-cli");
     expect(output).toContain("Credential source: claude-cli");
+    expect(output).toContain("Playwright Chromium already installed.");
   });
 
   test("passes resolved credentials to subprocesses without mutating process.env", async () => {
@@ -247,6 +252,7 @@ describe("Setup wizard happy path", () => {
         isSmoke: true,
         isTty: false,
         configDir: tempDir,
+        detectPlaywright: async () => ({ installed: false }),
       });
 
       expect(spawnEnvKeys).toEqual([PLACEHOLDER_KEY, PLACEHOLDER_KEY]);
@@ -427,11 +433,114 @@ describe("Interactive credentials write to claude config", () => {
       isSmoke: false,
       isTty: true,
       configDir: tempDir,
+      detectPlaywright: async () => ({ installed: true }),
     });
 
     expect(output).toContain("Wrote API key to");
     const raw = await readFile(join(tempDir, ".credentials.json"), "utf8");
     expect(JSON.parse(raw)).toEqual({ apiKey: PLACEHOLDER_KEY });
     expect(prompts.some((p) => p.includes("Select a project"))).toBe(true);
+  });
+});
+
+describe("Setup wizard playwright step", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "vimbus-setup-pw-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  function buildBaseFetch(): typeof fetch {
+    return makeFetch((url, { method }) => {
+      if (method === "GET" && url.endsWith("/projects")) {
+        return Response.json([{ id: "project_1", name: "X", rootPath: "/r", baseBranch: "main" }]);
+      }
+      if (method === "GET" && url.includes("/model-slots")) {
+        return Response.json([{ slotKey: "reviewer", primaryModel: { slug: "claude-opus-4-7" } }]);
+      }
+      if (method === "GET" && url.includes("/mcp/servers")) {
+        return Response.json([]);
+      }
+      if (method === "POST" && url.endsWith("/mcp/probe")) {
+        return Response.json([]);
+      }
+      return new Response("not found", { status: 404 });
+    });
+  }
+
+  test("smoke skips playwright install when chromium is missing", async () => {
+    const spawnCalls: Array<{ command: string; args: readonly string[] }> = [];
+    const spawnImpl: SetupSpawnFn = async (command, args) => {
+      spawnCalls.push({ command, args });
+      return { exitCode: 0, stdout: "ok", stderr: "" };
+    };
+
+    const output = await runSetupCommand(["/setup", "--smoke"], {
+      env: { ANTHROPIC_API_KEY: PLACEHOLDER_KEY },
+      fetch: buildBaseFetch(),
+      spawn: spawnImpl,
+      cwd: "C:/repo",
+      isSmoke: true,
+      isTty: false,
+      configDir: tempDir,
+      detectPlaywright: async () => ({ installed: false }),
+    });
+
+    expect(output).toContain("Skipped (non-interactive)");
+    expect(output).toContain("Playwright: skipped (non-interactive)");
+    expect(spawnCalls.find((call) => call.command === "npx")).toBeUndefined();
+  });
+
+  test("install failure logs warning and does not abort the wizard", async () => {
+    const spawnImpl: SetupSpawnFn = async (command, args) => {
+      if (command === "npx" && args[0] === "playwright") {
+        return { exitCode: 1, stdout: "", stderr: "network error" };
+      }
+      return { exitCode: 0, stdout: "ok", stderr: "" };
+    };
+
+    const output = await runSetupCommand(["/setup", "--install-playwright=true"], {
+      env: { ANTHROPIC_API_KEY: PLACEHOLDER_KEY },
+      fetch: buildBaseFetch(),
+      spawn: spawnImpl,
+      cwd: "C:/repo",
+      isSmoke: false,
+      isTty: false,
+      configDir: tempDir,
+      detectPlaywright: async () => ({ installed: false, reason: "missing" }),
+    });
+
+    expect(output).toContain("Warning: Playwright install failed (exit 1)");
+    expect(output).toContain("Playwright: failed (network error)");
+    expect(output).toContain("Setup complete.");
+  });
+
+  test("--no-playwright explicitly skips playwright step", async () => {
+    const spawnCalls: Array<{ command: string; args: readonly string[] }> = [];
+    const spawnImpl: SetupSpawnFn = async (command, args) => {
+      spawnCalls.push({ command, args });
+      return { exitCode: 0, stdout: "ok", stderr: "" };
+    };
+
+    const output = await runSetupCommand(["/setup", "--smoke", "--no-playwright"], {
+      env: { ANTHROPIC_API_KEY: PLACEHOLDER_KEY },
+      fetch: buildBaseFetch(),
+      spawn: spawnImpl,
+      cwd: "C:/repo",
+      isSmoke: true,
+      isTty: false,
+      configDir: tempDir,
+      // detectPlaywright should not even be called when --no-playwright is set, but provide it defensively.
+      detectPlaywright: async () => {
+        throw new Error("should not be called");
+      },
+    });
+
+    expect(output).toContain("Skipped (--no-playwright)");
+    expect(spawnCalls.find((call) => call.command === "npx")).toBeUndefined();
   });
 });
