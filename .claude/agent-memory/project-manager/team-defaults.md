@@ -15,8 +15,8 @@ type: project
 **Architecture:** Verification-first execution loop — Planner → Verification Contract → Approval → Execution → Verified Output
 **AI engine:** Vercel AI SDK runtime wiring with policy-selected model slots and tool-gated execution
 
-**Jira container project key:** HC
-**Logical project scope:** VimbusProMax3000 / TaskGoblin via labels `vimbuspromax3000` and `taskgoblin`
+**Jira container project key:** VIM
+**Logical project scope:** VimbusProMax3000 / TaskGoblin (project is Vimbus-dedicated; no label filter required)
 **Jira site URL:** https://apollonadmin.atlassian.net
 
 > Note: All numbers above are starting estimates. Update after first sprint retrospective.

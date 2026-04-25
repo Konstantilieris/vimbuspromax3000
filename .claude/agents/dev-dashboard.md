@@ -23,28 +23,30 @@ Provide an option to switch: if the user says "show me Aggelos's tasks" or "swit
 
 ## Vimbus Jira Scope
 
-VimbusProMax3000 work is stored in Jira project `HC` but scoped by Vimbus labels and text, not by a separate Jira project key. Every dashboard query must include this Vimbus scope:
+VimbusProMax3000 work lives in the dedicated Jira project `VIM`. The project is Vimbus-only, so the scope JQL is simply:
 
-`project = HC AND (labels in (vimbuspromax3000, taskgoblin) OR summary ~ "Vimbus" OR text ~ "Vimbus" OR summary ~ "VimbusProMax3000" OR text ~ "VimbusProMax3000")`
+`project = VIM`
+
+No label or text filter is required. Historical MVP tickets HC-76 through HC-99 are closed in the legacy `HC` (Holocomm) project and are not surfaced by this dashboard.
 
 ## Dashboard Protocol
 
 Run these queries in parallel where possible:
 
 1. **Query all open tickets** — Single query covering all statuses:
-   JQL: `project = HC AND assignee = "{Jira display name}" AND statusCategory != Done AND (labels in (vimbuspromax3000, taskgoblin) OR summary ~ "Vimbus" OR text ~ "Vimbus" OR summary ~ "VimbusProMax3000" OR text ~ "VimbusProMax3000") ORDER BY priority DESC, updated DESC`
+   JQL: `project = VIM AND assignee = "{Jira display name}" AND statusCategory != Done ORDER BY priority DESC, updated DESC`
    From the results, split client-side into: In Progress / To Do / other statuses.
 
 2. **Query active sprint** — Get current sprint context:
-   JQL: `project = HC AND sprint in openSprints() AND (labels in (vimbuspromax3000, taskgoblin) OR summary ~ "Vimbus" OR text ~ "Vimbus" OR summary ~ "VimbusProMax3000" OR text ~ "VimbusProMax3000")`
+   JQL: `project = VIM AND sprint in openSprints()`
    Extract: sprint name, start date, end date, days remaining.
    If openSprints() is not supported (team-managed project limitation), fall back to fetching all tickets and noting "Sprint data unavailable — showing full backlog."
 
 3. **Query sprint commitment** — Which of your tickets are in the active sprint:
-   JQL: `project = HC AND assignee = "{Jira display name}" AND sprint in openSprints() AND statusCategory != Done AND (labels in (vimbuspromax3000, taskgoblin) OR summary ~ "Vimbus" OR text ~ "Vimbus" OR summary ~ "VimbusProMax3000" OR text ~ "VimbusProMax3000")`
+   JQL: `project = VIM AND assignee = "{Jira display name}" AND sprint in openSprints() AND statusCategory != Done`
 
 4. **Query teammate workload** — For comparison:
-   JQL: `project = HC AND assignee = "{teammate Jira display name}" AND statusCategory != Done AND (labels in (vimbuspromax3000, taskgoblin) OR summary ~ "Vimbus" OR text ~ "Vimbus" OR summary ~ "VimbusProMax3000" OR text ~ "VimbusProMax3000")`
+   JQL: `project = VIM AND assignee = "{teammate Jira display name}" AND statusCategory != Done`
 
 5. **Detect blocked tickets** — From your open tickets, check each ticket's issue links for "is blocked by" relationships. Flag any ticket that has an unresolved blocker.
 
@@ -114,16 +116,16 @@ If the user asks to perform an action, execute it directly using Atlassian MCP:
 - "show details of {key}" → fetch and display full ticket description + comments
 
 ## Error Handling
-- If Jira returns an error, report it clearly: "Jira returned an error: {message}. Check that project HC exists, Vimbus labels are present, and you have access."
+- If Jira returns an error, report it clearly: "Jira returned an error: {message}. Check that project VIM exists and you have access."
 - If sprint query returns no active sprint, skip sprint sections and note: "No active sprint found — showing full backlog."
 - If no tickets found, say: "You have no open VimbusProMax3000 tickets assigned to you."
 
 ## Rules
-- Jira container project key is HC (apollonadmin.atlassian.net); Vimbus scope is `labels in (vimbuspromax3000, taskgoblin)` plus Vimbus text matching.
+- Jira container project key is VIM (apollonadmin.atlassian.net); the project is dedicated to Vimbus, no label filter needed.
 - Always detect identity via git config first — never skip this step
 - Run Jira queries before presenting any output — never show placeholder data
 - Never modify tickets unless the user explicitly requests a quick action
 - Keep the dashboard concise — backlog details only on request
 - If the user asks "what should I work on next", give one clear recommendation, not a list
-- If the user asks a direct question about a specific ticket (e.g. "is HC-80 blocked?", "who owns HC-76?"), answer it directly without showing the full dashboard.
+- If the user asks a direct question about a specific ticket (e.g. "is VIM-12 blocked?", "who owns VIM-7?"), answer it directly without showing the full dashboard. Legacy HC-XX keys are historical (closed MVP work) and may also appear in conversation.
 - If the user says "show all tasks" or "list everything", show a flat list of all open tickets without the dashboard format.

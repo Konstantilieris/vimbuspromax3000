@@ -5,21 +5,23 @@ type: reference
 ---
 
 Jira site: apollonadmin.atlassian.net
-Jira container project key: HC
+Jira container project key: VIM
 Logical project: VimbusProMax3000 / TaskGoblin
 Cloud ID: a9dc8917-e4cb-48be-bf4f-84b1f381906e
 
 **Vimbus issue scope JQL:**
-`project = HC AND (labels in (vimbuspromax3000, taskgoblin) OR summary ~ "Vimbus" OR text ~ "Vimbus" OR summary ~ "VimbusProMax3000" OR text ~ "VimbusProMax3000")`
+`project = VIM`
 
 **Aggelos open Vimbus dashboard JQL:**
-`project = HC AND assignee = "Aggelos Konstantilieris" AND statusCategory != Done AND (labels in (vimbuspromax3000, taskgoblin) OR summary ~ "Vimbus" OR text ~ "Vimbus" OR summary ~ "VimbusProMax3000" OR text ~ "VimbusProMax3000") ORDER BY priority DESC, updated DESC`
+`project = VIM AND assignee = "Aggelos Konstantilieris" AND statusCategory != Done ORDER BY priority DESC, updated DESC`
 
-**Available issue types:** Epic, Story, Task, Bug, Subtask
+**Available issue types:** Epic, Story, Task, Bug, Subtask, Feature
 
 **Field constraints:**
-- `story_points` field is NOT available on the HC project screen — do not include in `additional_fields`
+- `story_points` field is NOT available on the VIM project screen — do not include in `additional_fields`
 - Story point estimates should be noted in the description body instead
-- Labels are supported
+- Labels are supported (optional; the project is Vimbus-dedicated, no label-based scoping required)
 
-**How to apply:** When creating Vimbus issues, create them in Jira project `HC`, add labels `vimbuspromax3000` and `taskgoblin`, use `apollonadmin.atlassian.net` as cloudId, and never include `story_points` in additional_fields.
+**How to apply:** When creating Vimbus issues, create them in Jira project `VIM`, use `apollonadmin.atlassian.net` as cloudId, and never include `story_points` in additional_fields. No label filter is needed because VIM is dedicated to Vimbus work.
+
+**Historical note:** Vimbus MVP work HC-76 through HC-99 originally lived in the multi-tenant `HC` (Holocomm) project, scoped via the labels `vimbuspromax3000` and `taskgoblin`. Those tickets remain closed in HC; all new Vimbus work goes to VIM.
