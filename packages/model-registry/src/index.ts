@@ -15,6 +15,9 @@ import {
   isModelSlotKey,
 } from "@vimbuspromax3000/shared";
 
+// Aggregated re-export for credential helpers used by HC-95/HC-96 onboarding flow.
+export * from "./claudeCredentials";
+
 export type CreateSecretRefInput = {
   projectId: string;
   kind: ModelSecretRefKind;

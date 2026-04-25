@@ -3,6 +3,7 @@ import { EXECUTION_COMMANDS } from "./execution";
 import { MCP_COMMANDS } from "./mcp";
 import { MODEL_COMMANDS } from "./models";
 import { PLANNER_COMMANDS } from "./planner";
+import { SETUP_COMMANDS } from "./setup";
 
 export const DASHBOARD_COLUMNS = [
   "Epics / Tasks",
@@ -14,6 +15,7 @@ export function getDashboardLines(): string[] {
   return [
     `${PRODUCT_NAME} operator console`,
     DASHBOARD_COLUMNS.join(" | "),
+    `Setup: ${SETUP_COMMANDS.join(" ")}`,
     `Models: ${MODEL_COMMANDS.join(" ")}`,
     `MCP: ${MCP_COMMANDS.join(" ")}`,
     `Planner: ${PLANNER_COMMANDS.join(" ")}`,
