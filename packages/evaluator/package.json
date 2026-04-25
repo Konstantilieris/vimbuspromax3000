@@ -1,0 +1,16 @@
+{
+  "name": "@vimbuspromax3000/evaluator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "ai": "^6.0.168",
+    "@vimbuspromax3000/agent": "workspace:*",
+    "@vimbuspromax3000/db": "workspace:*",
+    "@vimbuspromax3000/policy-engine": "workspace:*",
+    "@vimbuspromax3000/shared": "workspace:*"
+  }
+}

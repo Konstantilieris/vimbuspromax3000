@@ -29,6 +29,10 @@ export default defineConfig({
         replacement: fileURLToPath(new URL("./packages/db/src/index.ts", import.meta.url)),
       },
       {
+        find: "@vimbuspromax3000/evaluator",
+        replacement: fileURLToPath(new URL("./packages/evaluator/src/index.ts", import.meta.url)),
+      },
+      {
         find: "@vimbuspromax3000/mcp-client",
         replacement: fileURLToPath(new URL("./packages/mcp-client/src/index.ts", import.meta.url)),
       },

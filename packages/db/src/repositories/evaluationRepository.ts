@@ -96,6 +96,33 @@ export async function listEvalRuns(
   });
 }
 
+export async function listEvalRunsForExecution(db: DatabaseClient, taskExecutionId: string) {
+  return db.evalRun.findMany({
+    where: { taskExecutionId },
+    include: { results: { orderBy: [{ createdAt: "asc" }] } },
+    orderBy: [{ createdAt: "desc" }],
+  });
+}
+
+export async function getEvalRunDetail(db: DatabaseClient, id: string) {
+  return db.evalRun.findUnique({
+    where: { id },
+    include: { results: { orderBy: [{ createdAt: "asc" }] } },
+  });
+}
+
+export async function getLatestCompletedEvalRun(
+  db: DatabaseClient,
+  taskExecutionId: string,
+  inputHash: string,
+) {
+  return db.evalRun.findFirst({
+    where: { taskExecutionId, inputHash, status: "completed" },
+    include: { results: { orderBy: [{ createdAt: "asc" }] } },
+    orderBy: [{ createdAt: "desc" }],
+  });
+}
+
 export async function createEvalResult(
   db: DatabaseClient,
   input: {

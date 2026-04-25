@@ -12,6 +12,7 @@
     "paths": {
       "@vimbuspromax3000/agent": ["packages/agent/src/index.ts"],
       "@vimbuspromax3000/benchmarks": ["packages/benchmarks/src/index.ts"],
+      "@vimbuspromax3000/evaluator": ["packages/evaluator/src/index.ts"],
       "@vimbuspromax3000/db": ["packages/db/src/index.ts"],
       "@vimbuspromax3000/db/*": ["packages/db/src/*"],
       "@vimbuspromax3000/mcp-client": ["packages/mcp-client/src/index.ts"],

@@ -64,6 +64,7 @@ import {
   type McpServerDefinition,
   type McpServerSetupPayload,
 } from "@vimbuspromax3000/mcp-client";
+import { createEvaluatorService, EvaluatorError, type EvaluatorService } from "@vimbuspromax3000/evaluator";
 import {
   assignSlot,
   createModel,
@@ -128,6 +129,7 @@ export type ApiAppOptions = {
   plannerService?: PlannerService;
   executionService?: ExecutionService;
   testRunnerService?: TestRunnerService;
+  evaluatorService?: EvaluatorService;
 };
 
 export function createApp(options: ApiAppOptions = {}) {
@@ -138,6 +140,7 @@ export function createApp(options: ApiAppOptions = {}) {
   const executionService = options.executionService ?? createExecutionService({ prisma, env });
   const testRunnerService = options.testRunnerService ?? createTestRunnerService({ prisma });
   const mcpService = createMcpService({ prisma });
+  const evaluatorService = options.evaluatorService ?? createEvaluatorService({ prisma, env });
 
   app.onError((error, context) =>
     context.json(
@@ -1121,6 +1124,35 @@ export function createApp(options: ApiAppOptions = {}) {
         syncStatus: optionalLangSmithSyncStatus(body.syncStatus),
       }),
     );
+  });
+
+  app.post("/executions/:id/evaluations", async (context) => {
+    const execution = await getTaskExecutionDetail(prisma, context.req.param("id"));
+
+    if (!execution) {
+      return context.json({ error: "Execution was not found." }, 404);
+    }
+
+    try {
+      const evalRun = await evaluatorService.runEvaluation(context.req.param("id"));
+      return context.json({ evalRun });
+    } catch (err) {
+      if (err instanceof EvaluatorError && err.code === "MODEL_SLOT_UNAVAILABLE") {
+        return context.json({ code: err.code, message: err.message }, 422);
+      }
+      throw err;
+    }
+  });
+
+  app.get("/executions/:id/evaluations", async (context) => {
+    const execution = await getTaskExecutionDetail(prisma, context.req.param("id"));
+
+    if (!execution) {
+      return context.json({ error: "Execution was not found." }, 404);
+    }
+
+    const evalRuns = await evaluatorService.listEvalRuns(context.req.param("id"));
+    return context.json({ evalRuns });
   });
 
   return app;
