@@ -64,8 +64,8 @@ Jira/repo audit as of 2026-04-25:
 | HC-78 | Done | Landed on `main` as MCP client, server catalog, API routes, and persistence. Wrapper gates landed separately in HC-91. | done | Nikos |
 | HC-79 | Done | Landed on `main` at `e5c801d` (cherry-pick of `origin/dev` `2c03c18`): full evaluator package with rule-based, LLM judge, and hybrid evaluators across all 8 dimensions. | done | Nikos |
 | HC-80 | Done | Landed on `main` at `1108df6`: `packages/verification/{capture,diff,pdf}.ts` — Playwright screenshot capture, pixelmatch pixel diff, pdfjs-dist PDF metadata diff. | done | Aggelos |
-| HC-81 | To Do | Full benchmark/regression layer (`packages/benchmarks`) already on `main`; ticket remains open for Nikos to confirm scope coverage and close. | later | Nikos |
-| HC-82 | To Do | LangSmith exporter + link persistence (`packages/observability`) already on `main`; ticket remains open for Nikos to confirm scope coverage and close. | later | Nikos |
+| HC-81 | Done | Full benchmark/regression layer landed on `main` in commit `d54b665` (`packages/benchmarks` — 8-dimension scoring, baselines, regression comparison gates). | done | Nikos |
+| HC-82 | Done | LangSmith exporter + link persistence landed on `main` in commit `d54b665` (`packages/observability` — HTTP client, non-blocking export, link CRUD). | done | Nikos |
 | HC-83 | Done | Tracker reconciliation handoff complete. | done | Aggelos |
 | HC-95 | Done | Landed on `main` at `a7f8ae3`: `apps/cli/src/setup.ts` wizard sequencing project → credentials → models → MCP → health. | done | Aggelos |
 | HC-96 | Done | Landed on `main` at `a7f8ae3`: `packages/model-registry/src/claudeCredentials.ts` — env + `~/.claude/.credentials.json` discovery and read-modify-write persistence. | done | Aggelos |
@@ -73,7 +73,12 @@ Jira/repo audit as of 2026-04-25:
 | HC-98 | Done | Landed on `main` (commit `d54b665`): `apps/cli/src/mcp.ts` (444 LOC) `/mcp:setup`, `/mcp:add-server`, `/mcp:servers`, plus API routes. | done | Aggelos |
 | HC-99 | Done | Landed on `main` (commit `d54b665`): `/mcp:set-secret` CLI + `POST /mcp/servers/:id/credential` API + persistence. | done | Aggelos |
 
-All current Vimbus MVP slices are now on `main`. HC-81 and HC-82 remain open in Jira but their implementations already shipped on `main` in commit `d54b665`; they should be reviewed by Nikos and either closed or scoped further.
+All Vimbus MVP slices (HC-76 through HC-99) are Done both on `main` and in Jira.
+
+Post-merge code-review follow-up commits also on `main`:
+- `29c5738` fix(evaluator): proceed-threshold off-by-one, dimension scoring when no MCP calls, hash idempotency, retry/escalate decision
+- `66f0aa5` fix(visual): pdf page-count cache before destroy, narrower `BrowserNotInstalledError`, explicit context.close before browser.close, accurate `diffPixels` reporting
+- `71da2f5` fix(onboarding): atomic credential write via tempfile+rename, full slot defaults, health-check fails on unreachable API, drop shell:true on Windows, no process.env mutation
 
 ## MVP Finish Line
 
