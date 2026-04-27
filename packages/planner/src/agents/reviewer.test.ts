@@ -131,15 +131,12 @@ describe("runReviewer", () => {
     }
   });
 
-  test("re-routes to verificationDesigner when a task is missing verification, then accepts after the designer fallback fills it", async () => {
-    // The verification designer's deterministic safety net injects a fallback
-    // verification item when one is missing. After a single re-route we expect
-    // the reviewer to accept.
-    const deps = buildDeps(async () => {
-      throw new Error(
-        "generator should not be called by the Sprint 2 verification designer fallback path",
-      );
-    });
+  test("re-routes to verificationDesigner when a task is missing verification, then accepts after the designer's deterministic fallback fills it", async () => {
+    // The verification designer issues a generator call on redo; we return an
+    // empty payload so the deterministic safety net (`ensureVerificationItems`)
+    // injects the fallback vitest item. After a single re-route the reviewer
+    // accepts.
+    const deps = buildDeps(async () => ({ object: { epics: [] } }));
     const upstream: VerificationDesignerOutput = {
       generated: buildProposalWithMissingVerification(),
     };
