@@ -7,6 +7,7 @@ import {
   createModelDecision,
   createTaskExecution,
   createTaskBranch,
+  getLatestModelDecision,
   getLatestPatchReview,
   getTaskBranch,
   getTaskBranchDetail,
@@ -19,8 +20,8 @@ import {
   updateTaskExecution,
 } from "@vimbuspromax3000/db";
 import { createMcpService } from "@vimbuspromax3000/mcp-client";
-import type { LoopEventType } from "@vimbuspromax3000/shared";
-import { resolveModelSlot } from "@vimbuspromax3000/policy-engine";
+import type { LoopEventType, ModelDecisionState } from "@vimbuspromax3000/shared";
+import { resolveModelSlot, selectExecutorSlotForAttempt } from "@vimbuspromax3000/policy-engine";
 import {
   runAgentLoop,
   type AgentGenerator,
@@ -28,11 +29,57 @@ import {
   type ToolDef,
 } from "./agentLoop";
 
+/**
+ * VIM-30 — typed payload returned by {@link ExecutionService.retryExecution}.
+ *
+ * `terminated` is `true` only when the attempt budget is exhausted (per
+ * docs/policy/model-selection.md): the execution + task have been moved to
+ * `failed` and a `task.failed` event has been emitted.
+ */
+export type RetryExecutionResult = {
+  decision: {
+    id: string;
+    attempt: number;
+    selectedSlot: string;
+    selectedModel: string | null;
+    reason: string;
+    state: ModelDecisionState;
+  };
+  execution: NonNullable<Awaited<ReturnType<typeof getTaskExecutionDetail>>>;
+  /** True when this retry exhausted the attempt budget. */
+  terminated: boolean;
+};
+
+/**
+ * VIM-30 — typed error surfaced when the retry endpoint cannot resolve the
+ * required executor slot. The API maps this to HTTP 422 with the same
+ * MODEL_SLOT_UNAVAILABLE code already used by the evaluator gate.
+ */
+export class RetryExecutionError extends Error {
+  constructor(
+    message: string,
+    public readonly code: "EXECUTION_NOT_FOUND" | "MODEL_SLOT_UNAVAILABLE",
+  ) {
+    super(message);
+    this.name = "RetryExecutionError";
+  }
+}
+
 export type ExecutionService = {
   getTaskBranch(taskId: string): Promise<Awaited<ReturnType<typeof getTaskBranchDetail>>>;
   prepareTaskBranch(input: { taskId: string }): Promise<Awaited<ReturnType<typeof getTaskBranchDetail>>>;
   abandonTaskBranch(input: { taskId: string }): Promise<Awaited<ReturnType<typeof getTaskBranchDetail>>>;
   startTaskExecution(input: { taskId: string }): Promise<Awaited<ReturnType<typeof getTaskExecutionDetail>>>;
+  /**
+   * VIM-30 — drive an attempt-based retry on a task execution.
+   *
+   * Idempotent: while the latest {@link ModelDecision} for the execution is
+   * still in state `selected`, calling this is a no-op that returns the
+   * existing decision. To advance the attempt window, the caller (eval
+   * gate) flips the latest decision's state to `stopped` after a failed
+   * verification — then the next call allocates the next attempt.
+   */
+  retryExecution(executionId: string): Promise<RetryExecutionResult>;
   getExecutionPatchReview(
     executionId: string,
   ): Promise<{
@@ -437,6 +484,182 @@ export function createExecutionService(options: {
       return detail;
     },
 
+    async retryExecution(executionId) {
+      const detail = await getTaskExecutionDetail(prisma, executionId);
+      if (!detail) {
+        throw new RetryExecutionError(
+          `Task execution ${executionId} was not found.`,
+          "EXECUTION_NOT_FOUND",
+        );
+      }
+
+      const projectId = detail.task.epic.project.id;
+      const taskId = detail.task.id;
+      const complexityLabel = detail.task.complexity;
+
+      const latestDecision = await getLatestModelDecision(prisma, executionId);
+
+      // Idempotency: latest decision still active for the in-flight attempt.
+      if (latestDecision && latestDecision.state === "selected") {
+        return {
+          decision: toDecisionDTO(latestDecision),
+          execution: detail,
+          terminated: false,
+        };
+      }
+
+      // Compute the next attempt = (highest known attempt) + 1. The initial
+      // execution writes attempt=1 from `startTaskExecution`; if no row yet
+      // exists, the first retry seeds attempt=2 to keep the contract that
+      // attempt=1 belongs to the initial run.
+      const nextAttempt = (latestDecision?.attempt ?? 1) + 1;
+      const slotChoice = selectExecutorSlotForAttempt(nextAttempt);
+
+      if (slotChoice.kind === "fail") {
+        // Terminal: persist a stopped decision, fail the task + execution,
+        // and emit task.failed via the existing event mechanism. The sibling
+        // VIM-36 agent owns the underlying transport refactor; we keep using
+        // appendLoopEvent so the 100ms poller picks the event up.
+        const finishedAt = new Date();
+        const terminalSlot = latestDecision?.selectedSlot ?? "executor_strong";
+        let terminalDecisionId = "";
+
+        await prisma.$transaction(async (tx) => {
+          const created = await createModelDecision(tx, {
+            projectId,
+            taskExecutionId: executionId,
+            attempt: nextAttempt,
+            complexityLabel,
+            selectedSlot: terminalSlot,
+            selectedModel: null,
+            reason: slotChoice.reason,
+            state: "stopped",
+          });
+          terminalDecisionId = created.id;
+          await updateTaskExecution(tx, executionId, {
+            status: "failed",
+            retryCount: nextAttempt - 1,
+            finishedAt,
+          });
+          await setTaskStatus(tx, taskId, "failed");
+          await appendLoopEvent(tx, {
+            projectId,
+            taskExecutionId: executionId,
+            type: "task.failed",
+            payload: {
+              taskId,
+              code: "MAX_ATTEMPTS_EXCEEDED",
+              message: `Task ${taskId} exhausted retry budget after ${nextAttempt - 1} attempt(s).`,
+              attempt: nextAttempt,
+            },
+          });
+        });
+
+        const refreshed = await getTaskExecutionDetail(prisma, executionId);
+        if (!refreshed) {
+          throw new Error(`Task execution ${executionId} disappeared after failure transition.`);
+        }
+
+        return {
+          decision: {
+            id: terminalDecisionId,
+            attempt: nextAttempt,
+            selectedSlot: terminalSlot,
+            selectedModel: null,
+            reason: slotChoice.reason,
+            state: "stopped",
+          },
+          execution: refreshed,
+          terminated: true,
+        };
+      }
+
+      // Non-terminal: resolve the slot, persist the decision, bump retryCount.
+      const resolution = await resolveModelSlot(
+        prisma,
+        {
+          projectId,
+          slotKey: slotChoice.slotKey,
+          taskExecutionId: executionId,
+        },
+        env,
+      );
+
+      if (!resolution.ok) {
+        throw new RetryExecutionError(
+          `Cannot retry: model slot ${slotChoice.slotKey} unavailable (${resolution.code}: ${resolution.message})`,
+          "MODEL_SLOT_UNAVAILABLE",
+        );
+      }
+
+      const decisionState: ModelDecisionState =
+        slotChoice.reason === "escalate_to_strong" ? "escalated" : "selected";
+
+      let createdDecisionId = "";
+      const concreteModelName = resolution.value.concreteModelName;
+
+      await prisma.$transaction(async (tx) => {
+        const created = await createModelDecision(tx, {
+          projectId,
+          taskExecutionId: executionId,
+          attempt: nextAttempt,
+          complexityLabel,
+          selectedSlot: slotChoice.slotKey,
+          selectedModel: concreteModelName,
+          reason: slotChoice.reason,
+          state: decisionState,
+        });
+        createdDecisionId = created.id;
+        await updateTaskExecution(tx, executionId, {
+          retryCount: nextAttempt - 1,
+        });
+        await appendLoopEvent(tx, {
+          projectId,
+          taskExecutionId: executionId,
+          type: "model.selected",
+          payload: {
+            taskId,
+            slotKey: slotChoice.slotKey,
+            selectedModel: concreteModelName,
+            attempt: nextAttempt,
+            reason: slotChoice.reason,
+          },
+        });
+        if (slotChoice.reason === "escalate_to_strong") {
+          await appendLoopEvent(tx, {
+            projectId,
+            taskExecutionId: executionId,
+            type: "model.escalated",
+            payload: {
+              taskId,
+              fromSlot: latestDecision?.selectedSlot ?? "executor_default",
+              toSlot: slotChoice.slotKey,
+              attempt: nextAttempt,
+              selectedModel: concreteModelName,
+            },
+          });
+        }
+      });
+
+      const refreshed = await getTaskExecutionDetail(prisma, executionId);
+      if (!refreshed) {
+        throw new Error(`Task execution ${executionId} disappeared after retry persistence.`);
+      }
+
+      return {
+        decision: {
+          id: createdDecisionId,
+          attempt: nextAttempt,
+          selectedSlot: slotChoice.slotKey,
+          selectedModel: concreteModelName,
+          reason: slotChoice.reason,
+          state: decisionState,
+        },
+        execution: refreshed,
+        terminated: false,
+      };
+    },
+
     async getExecutionPatchReview(executionId) {
       const execution = await getTaskExecutionDetail(prisma, executionId);
 
@@ -544,6 +767,24 @@ export function createExecutionService(options: {
         execution: updatedExecution,
       };
     },
+  };
+}
+
+function toDecisionDTO(decision: {
+  id: string;
+  attempt: number;
+  selectedSlot: string;
+  selectedModel: string | null;
+  reason: string;
+  state: string;
+}): RetryExecutionResult["decision"] {
+  return {
+    id: decision.id,
+    attempt: decision.attempt,
+    selectedSlot: decision.selectedSlot,
+    selectedModel: decision.selectedModel,
+    reason: decision.reason,
+    state: decision.state as ModelDecisionState,
   };
 }
 
