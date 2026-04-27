@@ -3,6 +3,7 @@ import { streamSSE } from "hono/streaming";
 import {
   createExecutionService,
   createVercelAiSdkAgentGeneratorFactory,
+  RetryExecutionError,
   type CreateAgentGenerator,
   type ExecutionService,
 } from "@vimbuspromax3000/agent";
@@ -805,6 +806,27 @@ export function createApp(options: ApiAppOptions = {}) {
 
   app.post("/executions/:id/patch/reject", async (context) => {
     return context.json(await executionService.rejectExecutionPatchReview(context.req.param("id")));
+  });
+
+  // VIM-30: attempt-based retry with same-slot retry, escalation to
+  // executor_strong on the second failure, and terminal task.failed on the
+  // third. Idempotent within an attempt window — see
+  // ExecutionService.retryExecution doc for the contract.
+  app.post("/executions/:id/retry", async (context) => {
+    try {
+      const result = await executionService.retryExecution(context.req.param("id"));
+      return context.json(result);
+    } catch (error) {
+      if (error instanceof RetryExecutionError) {
+        if (error.code === "EXECUTION_NOT_FOUND") {
+          return context.json({ code: error.code, message: error.message }, 404);
+        }
+        if (error.code === "MODEL_SLOT_UNAVAILABLE") {
+          return context.json({ code: error.code, message: error.message }, 422);
+        }
+      }
+      throw error;
+    }
   });
 
   app.get("/events", async (context) => {
