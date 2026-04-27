@@ -13,6 +13,61 @@ import {
   type ResolvedModelSnapshot,
 } from "@vimbuspromax3000/shared";
 
+/**
+ * VIM-30 — attempt-based executor slot escalation.
+ *
+ * Result returned by {@link selectExecutorSlotForAttempt}. Either we pick a
+ * concrete `executor_*` slot for the next attempt or we declare the task
+ * terminally failed because we've exhausted the retry budget.
+ */
+export type ExecutorAttemptDecision =
+  | {
+      kind: "execute";
+      slotKey: ModelSlotKey;
+      /**
+       * Normalized reason string persisted on the corresponding
+       * `ModelDecision.reason` row. Mirrors the "Stop Conditions" section
+       * of `docs/policy/model-selection.md`.
+       */
+      reason: "initial" | "retry_same_slot" | "escalate_to_strong";
+    }
+  | {
+      kind: "fail";
+      reason: "max_attempts_exceeded";
+    };
+
+/**
+ * Decide which executor slot a given attempt should run on. The mapping
+ * encodes the MVP G2 stop conditions:
+ *   - Attempt 1: `executor_default` (initial pick).
+ *   - Attempt 2: `executor_default` (one retry on the same slot).
+ *   - Attempt 3: `executor_strong` (escalate after the second failure).
+ *   - Attempt 4+: terminal failure — caller must transition the task and
+ *     emit `task.failed`.
+ *
+ * Pure helper: no DB access, no event emission. Keeps the rest of the
+ * package's scoring inputs untouched (VIM-35 owns those).
+ */
+export function selectExecutorSlotForAttempt(attempt: number): ExecutorAttemptDecision {
+  if (!Number.isInteger(attempt) || attempt < 1) {
+    throw new Error(`attempt must be a positive integer, received ${attempt}.`);
+  }
+
+  if (attempt === 1) {
+    return { kind: "execute", slotKey: "executor_default", reason: "initial" };
+  }
+
+  if (attempt === 2) {
+    return { kind: "execute", slotKey: "executor_default", reason: "retry_same_slot" };
+  }
+
+  if (attempt === 3) {
+    return { kind: "execute", slotKey: "executor_strong", reason: "escalate_to_strong" };
+  }
+
+  return { kind: "fail", reason: "max_attempts_exceeded" };
+}
+
 type CandidateValidation =
   | {
       ok: true;
