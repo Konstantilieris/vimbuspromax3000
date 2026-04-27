@@ -17,7 +17,7 @@ describe("mcp client onboarding helpers", () => {
       existingServers: [],
     });
 
-    expect(firstPlan.create).toHaveLength(4);
+    expect(firstPlan.create).toHaveLength(5);
     const dbPayload = firstPlan.create.find((server) => server.name === "taskgoblin-db");
     expect(dbPayload).toMatchObject({
       projectId: "project_1",

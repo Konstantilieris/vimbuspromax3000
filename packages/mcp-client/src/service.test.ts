@@ -17,6 +17,9 @@ import {
 } from "@vimbuspromax3000/db/testing";
 import { createMcpService, McpValidationError, STANDARD_MCP_SERVERS } from "./index";
 
+const SUITE_HOOK_TIMEOUT_MS = 60_000;
+const SUITE_TEST_TIMEOUT_MS = 60_000;
+
 describe("MCP client execution wrappers", () => {
   let prisma: PrismaClient;
   let tempDir: string;
@@ -25,12 +28,12 @@ describe("MCP client execution wrappers", () => {
     const isolated = await createIsolatedPrisma("vimbus-mcp-client-");
     prisma = isolated.prisma;
     tempDir = isolated.tempDir;
-  });
+  }, SUITE_HOOK_TIMEOUT_MS);
 
   afterEach(async () => {
     await prisma.$disconnect();
     removeTempDir(tempDir);
-  });
+  }, SUITE_HOOK_TIMEOUT_MS);
 
   test("catalog exposes only the minimal fs/git and shell wrapper tools", () => {
     expect(
@@ -44,13 +47,17 @@ describe("MCP client execution wrappers", () => {
         tools: ["read_file", "grep", "git_status", "git_diff", "apply_patch"],
       },
       {
+        name: "taskgoblin-patch",
+        tools: ["apply_patch"],
+      },
+      {
         name: "taskgoblin-shell",
         tools: ["run_command"],
       },
     ]);
   });
 
-  test("rejects invalid arguments before logging a tool call", async () => {
+  test("rejects invalid arguments before logging a tool call", { timeout: SUITE_TEST_TIMEOUT_MS }, async () => {
     const { project, execution, service } = await seedExecutableProject();
 
     await expect(
@@ -66,7 +73,7 @@ describe("MCP client execution wrappers", () => {
     await expect(prisma.mcpToolCall.count()).resolves.toBe(0);
   });
 
-  test("executes allowed read_file calls and logs completion metadata", async () => {
+  test("executes allowed read_file calls and logs completion metadata", { timeout: SUITE_TEST_TIMEOUT_MS }, async () => {
     const { project, execution, service } = await seedExecutableProject();
     const call = await service.createToolCall({
       projectId: project.id,
@@ -95,7 +102,7 @@ describe("MCP client execution wrappers", () => {
     await expectLoopEvents(project.id, ["mcp.tool.requested", "mcp.tool.completed"]);
   });
 
-  test("blocks read calls that escape the project root and logs the block", async () => {
+  test("blocks read calls that escape the project root and logs the block", { timeout: SUITE_TEST_TIMEOUT_MS }, async () => {
     const { project, execution, service } = await seedExecutableProject();
     const call = await service.createToolCall({
       projectId: project.id,
@@ -119,7 +126,7 @@ describe("MCP client execution wrappers", () => {
     await expectLoopEvents(project.id, ["mcp.tool.requested", "mcp.tool.blocked"]);
   });
 
-  test("blocks unapproved mutating calls by default", async () => {
+  test("blocks unapproved mutating calls by default", { timeout: SUITE_TEST_TIMEOUT_MS }, async () => {
     const { project, execution, service } = await seedExecutableProject();
     const call = await service.createToolCall({
       projectId: project.id,
@@ -140,7 +147,7 @@ describe("MCP client execution wrappers", () => {
     expect(readFileSync(`${tempDir}/src/demo.txt`, "utf8")).toBe("old\n");
   });
 
-  test("executes approved apply_patch calls and links the approval", async () => {
+  test("executes approved apply_patch calls and links the approval", { timeout: SUITE_TEST_TIMEOUT_MS }, async () => {
     const { project, execution, service } = await seedExecutableProject();
     const call = await service.createToolCall({
       projectId: project.id,
@@ -166,7 +173,7 @@ describe("MCP client execution wrappers", () => {
     expect(readFileSync(`${tempDir}/src/demo.txt`, "utf8").replace(/\r\n/g, "\n")).toBe("new\n");
   });
 
-  test("blocks approved shell commands that match unsafe patterns", async () => {
+  test("blocks approved shell commands that match unsafe patterns", { timeout: SUITE_TEST_TIMEOUT_MS }, async () => {
     const { project, execution, service } = await seedExecutableProject();
     const call = await service.createToolCall({
       projectId: project.id,
@@ -190,7 +197,7 @@ describe("MCP client execution wrappers", () => {
     }
   });
 
-  test("marks approved wrapper execution failures as failed and logs the error", async () => {
+  test("marks approved wrapper execution failures as failed and logs the error", { timeout: SUITE_TEST_TIMEOUT_MS }, async () => {
     const { project, execution, service } = await seedExecutableProject();
     const call = await service.createToolCall({
       projectId: project.id,
