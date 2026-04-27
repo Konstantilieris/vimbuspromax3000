@@ -4,6 +4,7 @@ import type {
   McpServerTransport,
   McpServerTrustLevel,
 } from "@vimbuspromax3000/shared";
+import { APPLY_PATCH_INPUT_SCHEMA, TASKGOBLIN_PATCH_SERVER_NAME } from "./wrappers/patch";
 
 export { createMcpService, McpError, McpValidationError } from "./service";
 export { STANDARD_MCP_SERVERS } from "./definitions";
@@ -20,6 +21,7 @@ export type { McpWrapperResult } from "./wrappers";
 
 export const STANDARD_MCP_SERVER_NAMES = [
   "taskgoblin-fs-git",
+  "taskgoblin-patch",
   "taskgoblin-shell",
   "taskgoblin-browser",
   "taskgoblin-db",
@@ -242,6 +244,25 @@ export function getStandardMcpServerDefinitions(): McpServerDefinition[] {
         tool("git_status", "Read git status for the workspace.", "read", false, JSON_OBJECT_SCHEMA),
         tool("git_diff", "Read git diff metadata and patches.", "read", false, JSON_OBJECT_SCHEMA),
         tool("apply_patch", "Apply a reviewed patch to the workspace.", "write", true, JSON_OBJECT_SCHEMA),
+      ],
+    },
+    {
+      name: TASKGOBLIN_PATCH_SERVER_NAME,
+      label: "TaskGoblin patch application",
+      transport: "stdio",
+      command: "bun",
+      args: ["--filter", "@vimbuspromax3000/mcp-server-patch", "start"],
+      trustLevel: "trusted",
+      authType: "none",
+      status: "pending",
+      tools: [
+        tool(
+          "apply_patch",
+          "Apply a unified diff to the active execution worktree using git apply --3way.",
+          "write",
+          true,
+          APPLY_PATCH_INPUT_SCHEMA as unknown as Record<string, unknown>,
+        ),
       ],
     },
     {

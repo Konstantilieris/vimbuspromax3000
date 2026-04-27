@@ -1,4 +1,5 @@
 import type { McpMutability } from "@vimbuspromax3000/shared";
+import { APPLY_PATCH_INPUT_SCHEMA, TASKGOBLIN_PATCH_SERVER_NAME } from "./wrappers/patch";
 
 type ToolDefinition = {
   name: string;
@@ -82,6 +83,23 @@ export const STANDARD_MCP_SERVERS: ServerDefinition[] = [
           },
           required: ["patch"],
         }),
+      },
+    ],
+  },
+  {
+    name: TASKGOBLIN_PATCH_SERVER_NAME,
+    transport: "stdio",
+    trustLevel: "trusted",
+    tools: [
+      {
+        name: "apply_patch",
+        description:
+          "Apply a unified diff to the active task execution worktree. Looks up the " +
+          "execution rootPath, asserts the worktree is on the task branch (and not the " +
+          "base branch), and runs git apply --3way. Requires operator approval.",
+        mutability: "write",
+        approvalRequired: true,
+        inputSchemaJson: JSON.stringify(APPLY_PATCH_INPUT_SCHEMA),
       },
     ],
   },
