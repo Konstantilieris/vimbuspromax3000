@@ -13,12 +13,20 @@ import {
   getTaskExecutionContext,
   getTaskExecutionDetail,
   setTaskStatus,
+  updateAgentStep,
   updatePatchReview,
   updateTaskBranch,
   updateTaskExecution,
 } from "@vimbuspromax3000/db";
 import { createMcpService } from "@vimbuspromax3000/mcp-client";
+import type { LoopEventType } from "@vimbuspromax3000/shared";
 import { resolveModelSlot } from "@vimbuspromax3000/policy-engine";
+import {
+  runAgentLoop,
+  type AgentGenerator,
+  type AgentLoopResult,
+  type ToolDef,
+} from "./agentLoop";
 
 export type ExecutionService = {
   getTaskBranch(taskId: string): Promise<Awaited<ReturnType<typeof getTaskBranchDetail>>>;
@@ -45,13 +53,43 @@ export type ExecutionService = {
   }>;
 };
 
+/**
+ * Inputs supplied to {@link CreateAgentGenerator} when an execution is about
+ * to start its plan -> tool-call loop. Keeps the policy-resolved model
+ * snapshot opaque so Sprint 2 can plug the real Vercel AI SDK behind this
+ * factory without touching the execution service plumbing.
+ */
+export type AgentGeneratorContext = {
+  taskExecutionId: string;
+  projectId: string;
+  taskId: string;
+  modelName: string;
+  toolCatalog: ToolDef[];
+};
+
+export type CreateAgentGenerator = (
+  context: AgentGeneratorContext,
+) => AgentGenerator | Promise<AgentGenerator>;
+
 export function createExecutionService(options: {
   prisma: PrismaClient;
   env?: Record<string, string | undefined>;
+  /**
+   * Sprint 1 wiring hook. When a factory is supplied, `startTaskExecution`
+   * drives a {@link runAgentLoop} after branch prep, model resolution, and
+   * the initial agent-step persistence. When absent (default), execution
+   * still completes its existing setup but skips the loop — preserving the
+   * pre-VIM-29 behaviour and keeping every existing API/test green.
+   */
+  agentGeneratorFactory?: CreateAgentGenerator;
+  /** Optional override for the loop turn budget. Default 25 (see policy doc). */
+  agentLoopMaxTurns?: number;
 }): ExecutionService {
   const prisma = options.prisma;
   const env = options.env ?? process.env;
   const mcpService = createMcpService({ prisma });
+  const agentGeneratorFactory = options.agentGeneratorFactory;
+  const agentLoopMaxTurns = options.agentLoopMaxTurns;
 
   return {
     async getTaskBranch(taskId) {
@@ -298,6 +336,98 @@ export function createExecutionService(options: {
         });
       });
 
+      // Sprint 1 wiring: drive the agent loop only when a generator factory is
+      // configured. This keeps existing branch/model/approval gates intact.
+      if (agentGeneratorFactory) {
+        const toolCatalog = await loadProjectToolCatalog(mcpService, project.id);
+        const generator = await agentGeneratorFactory({
+          taskExecutionId: execution.id,
+          projectId: project.id,
+          taskId: context.id,
+          modelName: resolution.value.concreteModelName,
+          toolCatalog,
+        });
+
+        const loopResult: AgentLoopResult = await runAgentLoop({
+          taskExecutionId: execution.id,
+          projectId: project.id,
+          agentRole: "executor",
+          modelName: resolution.value.concreteModelName,
+          toolCatalog,
+          generator,
+          maxTurns: agentLoopMaxTurns,
+          repository: {
+            createAgentStep: (input) =>
+              createAgentStep(prisma, {
+                taskExecutionId: input.taskExecutionId,
+                role: input.role,
+                modelName: input.modelName ?? null,
+                status: input.status,
+                summary: input.summary ?? null,
+                startedAt: input.startedAt,
+              }),
+            updateAgentStep: async (id, input) => {
+              await updateAgentStep(prisma, id, {
+                status: input.status,
+                summary: input.summary ?? null,
+                finishedAt: input.finishedAt ?? null,
+              });
+            },
+            appendLoopEvent: async (input) => {
+              await appendLoopEvent(prisma, {
+                projectId: input.projectId,
+                taskExecutionId: input.taskExecutionId,
+                type: input.type as LoopEventType,
+                payload: input.payload,
+              });
+            },
+          },
+          mcpService: {
+            createToolCall: (input) =>
+              mcpService.createToolCall({
+                projectId: input.projectId,
+                taskExecutionId: input.taskExecutionId ?? null,
+                serverName: input.serverName,
+                toolName: input.toolName,
+                args: input.args,
+              }),
+            executeToolCall: async (callId) => {
+              const result = await mcpService.executeToolCall(callId);
+              if (result.ok) {
+                return {
+                  ok: true as const,
+                  status: "succeeded" as const,
+                  callId,
+                  summary: result.call.resultSummary ?? null,
+                };
+              }
+              return {
+                ok: false as const,
+                status: result.status,
+                callId,
+                error: result.error,
+              };
+            },
+          },
+        });
+
+        if (loopResult.stopReason !== "finalize") {
+          // Surface non-finalize stop reasons via the existing failure event,
+          // but leave the execution row in `implementing` so downstream
+          // verification + patch review gates remain authoritative.
+          await appendLoopEvent(prisma, {
+            projectId: project.id,
+            taskExecutionId: execution.id,
+            type: "task.failed",
+            payload: {
+              taskId: context.id,
+              code: loopResult.stopReason.toUpperCase(),
+              message: `Agent loop stopped after ${loopResult.turns} turn(s) with reason ${loopResult.stopReason}.`,
+            },
+          });
+        }
+      }
+
       const detail = await getTaskExecutionDetail(prisma, execution.id);
 
       if (!detail) {
@@ -415,6 +545,38 @@ export function createExecutionService(options: {
       };
     },
   };
+}
+
+async function loadProjectToolCatalog(
+  mcpService: ReturnType<typeof createMcpService>,
+  projectId: string,
+): Promise<ToolDef[]> {
+  const tools = await mcpService.listProjectTools(projectId);
+  return tools
+    .filter((tool) => tool.status === "active")
+    .map<ToolDef>((tool) => ({
+      serverName: tool.server.name,
+      toolName: tool.name,
+      description: tool.description ?? undefined,
+      mutability: tool.mutability as ToolDef["mutability"],
+      approvalRequired: tool.approvalRequired,
+      inputSchema: parseToolSchema(tool.inputSchemaJson),
+    }));
+}
+
+function parseToolSchema(value: string | null | undefined): Record<string, unknown> {
+  if (!value) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Fall through to empty schema.
+  }
+  return {};
 }
 
 async function requireReadyTaskContext(prisma: PrismaClient, taskId: string) {
