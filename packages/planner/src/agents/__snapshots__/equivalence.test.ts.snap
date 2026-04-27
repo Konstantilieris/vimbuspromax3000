@@ -1,0 +1,209 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`VIM-33 Sprint 3 fan-out equivalence harness > fan-out output snapshot is stable [rich-kind-specific] 1`] = `
+{
+  "epics": [
+    {
+      "acceptance": [
+        {
+          "label": "task list visible",
+        },
+        {
+          "label": "screenshots stable",
+        },
+      ],
+      "goal": "Render and verify the task list",
+      "key": "PLAN-UNRICH-TASKS-UI",
+      "orderIndex": 0,
+      "risks": [
+        {
+          "label": "api shape drift",
+        },
+      ],
+      "tasks": [
+        {
+          "acceptance": [
+            {
+              "label": "list renders",
+            },
+            {
+              "label": "rows clickable",
+            },
+          ],
+          "complexity": "medium",
+          "description": null,
+          "orderIndex": 0,
+          "requires": [
+            "api: GET /tasks",
+          ],
+          "stableId": "PLAN-UNRICH-RENDER-TASK-LIST",
+          "targetFiles": [
+            "src/components/TaskList.tsx",
+          ],
+          "title": "Render task list",
+          "type": "frontend",
+          "verificationPlan": {
+            "items": [
+              {
+                "command": "bun run test:vitest",
+                "config": null,
+                "description": "Vitest unit test for the task list component.",
+                "expectedAssetId": null,
+                "interaction": null,
+                "kind": "logic",
+                "orderIndex": 0,
+                "rationale": null,
+                "route": null,
+                "runner": "vitest",
+                "testFilePath": "src/components/TaskList.test.ts",
+                "title": "Unit test render",
+              },
+              {
+                "command": "bunx vitest run apps/api/src/app.test.ts",
+                "config": null,
+                "description": "Verify task list endpoint returns correct shape.",
+                "expectedAssetId": null,
+                "interaction": null,
+                "kind": "integration",
+                "orderIndex": 1,
+                "rationale": null,
+                "route": "/tasks",
+                "runner": "playwright",
+                "testFilePath": null,
+                "title": "API integration check",
+              },
+              {
+                "command": null,
+                "config": null,
+                "description": "Compare rendered task list against baseline.",
+                "expectedAssetId": "asset_task_list_baseline",
+                "interaction": "load and scroll to bottom",
+                "kind": "visual",
+                "orderIndex": 2,
+                "rationale": null,
+                "route": "/tasks",
+                "runner": "playwright",
+                "testFilePath": null,
+                "title": "Screenshot comparison",
+              },
+            ],
+            "rationale": "Cover both unit-level rendering and integration shape.",
+          },
+        },
+      ],
+      "title": "Tasks UI",
+    },
+  ],
+  "plannerRunId": "planner_run_rich",
+  "summary": "Rich kind-specific plan",
+}
+`;
+
+exports[`VIM-33 Sprint 3 fan-out equivalence harness > fan-out output snapshot is stable [simple-two-epic] 1`] = `
+{
+  "epics": [
+    {
+      "acceptance": [
+        {
+          "label": "api boots",
+        },
+      ],
+      "goal": "Stand up the backend",
+      "key": "PLAN-SIMPLE-BACKEND-FOUNDATION",
+      "orderIndex": 0,
+      "risks": [
+        {
+          "label": "env drift",
+        },
+      ],
+      "tasks": [
+        {
+          "acceptance": [
+            {
+              "label": "server starts on port 3000",
+            },
+          ],
+          "complexity": "medium",
+          "description": null,
+          "orderIndex": 0,
+          "requires": null,
+          "stableId": "PLAN-SIMPLE-BOOT-THE-API-SERVER",
+          "targetFiles": null,
+          "title": "Boot the API server",
+          "type": "backend",
+          "verificationPlan": {
+            "items": [
+              {
+                "command": "bun run test:vitest",
+                "config": null,
+                "description": "Vitest unit test for server boot.",
+                "expectedAssetId": null,
+                "interaction": null,
+                "kind": "logic",
+                "orderIndex": 0,
+                "rationale": null,
+                "route": null,
+                "runner": "vitest",
+                "testFilePath": "apps/api/src/app.test.ts",
+                "title": "Boot smoke test",
+              },
+            ],
+            "rationale": null,
+          },
+        },
+      ],
+      "title": "Backend Foundation",
+    },
+    {
+      "acceptance": [
+        {
+          "label": "task list visible",
+        },
+      ],
+      "goal": "Render the task list",
+      "key": "PLAN-SIMPLE-UI-SLICE",
+      "orderIndex": 1,
+      "risks": [],
+      "tasks": [
+        {
+          "acceptance": [
+            {
+              "label": "component renders",
+            },
+          ],
+          "complexity": "small",
+          "description": null,
+          "orderIndex": 0,
+          "requires": null,
+          "stableId": "PLAN-SIMPLE-RENDER-TASKLIST-COMPONENT",
+          "targetFiles": null,
+          "title": "Render TaskList component",
+          "type": "frontend",
+          "verificationPlan": {
+            "items": [
+              {
+                "command": "bun run test:vitest",
+                "config": null,
+                "description": "Vitest unit test for TaskList.",
+                "expectedAssetId": null,
+                "interaction": null,
+                "kind": "logic",
+                "orderIndex": 0,
+                "rationale": null,
+                "route": null,
+                "runner": "vitest",
+                "testFilePath": "src/components/TaskList.test.ts",
+                "title": "TaskList unit test",
+              },
+            ],
+            "rationale": null,
+          },
+        },
+      ],
+      "title": "UI Slice",
+    },
+  ],
+  "plannerRunId": "planner_run_simple",
+  "summary": "Simple two-epic plan",
+}
+`;

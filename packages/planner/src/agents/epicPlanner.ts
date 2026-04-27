@@ -1,16 +1,20 @@
 import type { PlannerRunDetail } from "../service";
-import type { AgentInput, EpicPlannerOutput, GeneratedPlannerProposal, PlannerAgentDeps } from "./types";
+import type {
+  AgentInput,
+  EpicPlannerOutput,
+  EpicSkeleton,
+  PlannerAgentDeps,
+} from "./types";
 
 /**
- * Sprint 2 epic planner.
+ * Epic planner agent (VIM-33 Sprint 3).
  *
- * NOTE: The per-agent prompt below is a placeholder stub. Sprint 3 will replace
- * `buildEpicPlannerPrompt` and `buildEpicPlannerSystemPrompt` with the real
- * per-role prompts from docs/planner/agent-roles.md. For now the prompt content
- * mirrors the monolithic planner prompt so the underlying model still receives
- * the full operator context and can produce a complete proposal -- the other
- * agents in the pipeline are pass-through / shaping stages until prompts are
- * specialised next sprint.
+ * Owns ONLY epic-level metadata: title, goal, acceptance, risks. Tasks and
+ * verification items are produced downstream by the task writer and
+ * verification designer respectively.
+ *
+ * Resolves its own model slot via `slotResolver("epic_planner")` so per-agent
+ * slot routing flows through `resolveModelSlot` in the orchestrator wiring.
  */
 export async function runEpicPlanner(
   deps: PlannerAgentDeps,
@@ -24,57 +28,51 @@ export async function runEpicPlanner(
     seed: input.seed,
   });
 
+  const generated = (result.object ?? {}) as {
+    summary?: string;
+    epics?: EpicSkeleton[];
+  };
+
   return {
-    generated: result.object as GeneratedPlannerProposal,
+    summary: generated.summary,
+    epics: Array.isArray(generated.epics) ? generated.epics : [],
     reasoning: result.reasoning,
   };
 }
 
-function buildEpicPlannerSystemPrompt() {
-  // TODO(VIM-33 Sprint 3): replace with the real epic-planner prompt from
-  // docs/planner/agent-roles.md. The text below is the monolithic planner
-  // prompt preserved as a Sprint 2 fallback so existing tests keep passing.
+export function buildEpicPlannerSystemPrompt(): string {
   return [
-    "You are TaskGoblin's planner service.",
-    "Produce a software delivery proposal that can be persisted directly into SQLite planning records.",
-    "Keep the output grounded in the operator goal and interview JSON.",
-    "Every epic must include one or more tasks.",
-    "Every task must include acceptance criteria and at least one verification item.",
-    "Keep tasks narrowly scoped, ordered, and implementation-oriented.",
-    "Do not include execution, branching, or patch-review tasks yet.",
-    "Prefer repo-native verification commands such as bun run test:vitest and bun run typecheck when they fit.",
-    "The current POST /executions/:id/test-runs slice executes only approved verification items with a non-empty shell command.",
-    "Kind alone never makes a verification item runnable in this slice.",
-    "Treat Playwright CLI as a normal shell command when needed; do not assume browser MCP or tool-session execution.",
-    "If a visual or evidence check cannot be expressed as a shell command, it is not runnable by the current execution slice.",
-    "Per-kind field guidance:",
-    "- logic: set command (e.g. bun run test:vitest) and testFilePath pointing to the test file.",
-    "- integration: set command (e.g. bunx vitest run src/app.test.ts) and route for the API or module under test.",
-    "- typecheck: set command to bun run typecheck; no other required fields.",
-    "- lint: set command to bun run lint or equivalent; no other required fields.",
-    "- a11y: set command to a Playwright CLI command; set route and interaction describing the flow.",
-    "- visual: omit command if a shell equivalent does not exist; set route, interaction, and expectedAssetId as deferred metadata for operator review.",
-    "- evidence: omit command; set description to clearly state what the operator must inspect and where to find it.",
+    "You are TaskGoblin's epic planner agent.",
+    "Your sole responsibility is to group the operator goal into a small set of well-scoped epics.",
+    "Return ONLY epic-level metadata: title, goal, acceptance criteria, and risks.",
+    "Do NOT propose tasks. Do NOT propose verification plans. Downstream agents own those.",
+    "Keep epics narrowly scoped, ordered, and grounded in the operator goal and interview JSON.",
+    "Use concise titles. Acceptance and risks must be arrays of short strings.",
+    "Avoid execution, branching, or patch-review epics -- those are out of scope for this slice.",
   ].join("\n");
 }
 
-function buildEpicPlannerPrompt(plannerRun: PlannerRunDetail) {
-  // TODO(VIM-33 Sprint 3): replace with epic-planner-specific prompt that asks
-  // ONLY for epics (no tasks, no verification). For Sprint 2 the monolithic
-  // prompt is reused so the single generator call still returns the full
-  // proposal shape downstream agents are wired to thread.
-  const lines = [
-    `Project: ${plannerRun.project.name}`,
-    `Root Path: ${plannerRun.project.rootPath}`,
-    `Base Branch: ${plannerRun.project.baseBranch}`,
-    `Branch Naming: ${plannerRun.project.branchNaming}`,
-    `Goal: ${plannerRun.goal}`,
-  ];
+export function buildEpicPlannerPrompt(plannerRun: PlannerRunDetail): string {
+  const lines: string[] = [];
 
+  if (plannerRun.project?.name) {
+    lines.push(`Project: ${plannerRun.project.name}`);
+  }
+  if (plannerRun.project?.rootPath) {
+    lines.push(`Root Path: ${plannerRun.project.rootPath}`);
+  }
+  if (plannerRun.project?.baseBranch) {
+    lines.push(`Base Branch: ${plannerRun.project.baseBranch}`);
+  }
+  if (plannerRun.project?.branchNaming) {
+    lines.push(`Branch Naming: ${plannerRun.project.branchNaming}`);
+  }
+  if (plannerRun.goal) {
+    lines.push(`Goal: ${plannerRun.goal}`);
+  }
   if (plannerRun.moduleName) {
     lines.push(`Module: ${plannerRun.moduleName}`);
   }
-
   if (plannerRun.contextPath) {
     lines.push(`Context Path: ${plannerRun.contextPath}`);
   }
@@ -82,14 +80,10 @@ function buildEpicPlannerPrompt(plannerRun: PlannerRunDetail) {
   lines.push("Interview JSON:");
   lines.push(JSON.stringify(plannerRun.interview ?? {}, null, 2));
   lines.push("Output guidance:");
-  lines.push("- Use concise epic and task titles.");
-  lines.push("- Keep acceptance and risks specific.");
-  lines.push("- Use arrays of strings for acceptance, risks, targetFiles, and requires.");
-  lines.push("- Prefer command-backed verification items that can run through POST /executions/:id/test-runs.");
-  lines.push("- A verification item is runnable NOW only when it has a non-empty command field.");
-  lines.push("- Treat Playwright CLI as a normal shell command only; do not assume MCP-backed browser execution.");
-  lines.push("- visual and evidence items without a shell command are valid deferred metadata but will NOT run.");
-  lines.push("- logic: fill testFilePath. integration: fill route. a11y: fill route and interaction. visual: fill route, interaction, expectedAssetId.");
+  lines.push("- Return only epic skeletons (no tasks, no verification items).");
+  lines.push("- Each epic must have a concise title and a goal.");
+  lines.push("- Use arrays of strings for acceptance and risks.");
+  lines.push("- Order epics by dependency: foundation epics before extensions.");
 
   return lines.join("\n");
 }
