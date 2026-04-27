@@ -279,6 +279,21 @@ describe("planner/task/approval API", () => {
       slotKeys: ["planner_deep"],
     });
     expect(setupRef.status).toBe(201);
+    // VIM-33 follow-up: each planner agent now resolves its own slot. The
+    // verification designer agent maps to the verification_designer slot, so
+    // we need to seed it for the planner pipeline to resolve cleanly.
+    const verificationSetupRef = await postJson(api, "/model-setup", {
+      projectId: project.id,
+      providerKey: "openai",
+      providerKind: "openai",
+      providerStatus: "active",
+      secretEnv: "VIMBUS_TEST_KEY",
+      modelName: "GPT Verification",
+      modelSlug: "gpt-verification",
+      capabilities: ["json"],
+      slotKeys: ["verification_designer"],
+    });
+    expect(verificationSetupRef.status).toBe(201);
 
     const plannerRunRef = await postJson(api, "/planner/runs", {
       projectId: project.id,
