@@ -116,6 +116,7 @@
         "@vimbuspromax3000/db": "workspace:*",
         "@vimbuspromax3000/policy-engine": "workspace:*",
         "@vimbuspromax3000/shared": "workspace:*",
+        "@vimbuspromax3000/task-intel": "workspace:*",
         "ai": "^6.0.168",
       },
     },

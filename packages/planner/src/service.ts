@@ -13,6 +13,7 @@ import {
   type VerificationItemKind,
   type VerificationRunner,
 } from "@vimbuspromax3000/shared";
+import { scoreTaskComplexity } from "@vimbuspromax3000/task-intel";
 import { generateObject, jsonSchema, type JSONSchema7 } from "ai";
 import { runOrchestrator } from "./agents/orchestrator";
 import type { PlannerSlotResolver } from "./agents/types";
@@ -146,7 +147,12 @@ export function createPlannerService(options: PlannerServiceOptions): PlannerSer
         },
       );
 
-      await persistPlannerProposal(prisma, orchestratorResult.proposal);
+      // VIM-35: derive each task's complexity label deterministically from the
+      // task-intel scorer rather than trusting whatever label the LLM emitted.
+      // This is the single source of truth for the persisted complexity column.
+      const annotatedProposal = annotateProposalComplexity(orchestratorResult.proposal);
+
+      await persistPlannerProposal(prisma, annotatedProposal);
 
       const generatedPlannerRun = await getPlannerRunDetail(prisma, plannerRun.id);
 
@@ -156,12 +162,48 @@ export function createPlannerService(options: PlannerServiceOptions): PlannerSer
 
       return {
         plannerRun: generatedPlannerRun,
-        proposal: orchestratorResult.proposal,
+        proposal: annotatedProposal,
         slotKey,
         concreteModelName,
         reasoning: orchestratorResult.reasoning,
       };
     },
+  };
+}
+
+/**
+ * Re-derive each task's `complexity` label from the task-intel scorer using
+ * the signals available on the proposal (target file count as a proxy for
+ * fan-out + lines touched, distinct verification kinds as the diversity
+ * signal). The proposal is shallow-cloned so callers can keep the original
+ * untouched if they need it for diffing.
+ */
+export function annotateProposalComplexity(proposal: PlannerProposalInput): PlannerProposalInput {
+  return {
+    ...proposal,
+    epics: proposal.epics.map((epic) => ({
+      ...epic,
+      tasks: epic.tasks.map((task) => {
+        const targetFileCount = Array.isArray(task.targetFiles) ? task.targetFiles.length : 0;
+        const requiresCount = Array.isArray(task.requires) ? task.requires.length : 0;
+        const verificationKinds = task.verificationPlan.items
+          .map((item) => item.kind)
+          .filter((kind): kind is string => typeof kind === "string");
+
+        const score = scoreTaskComplexity({
+          // Each target file is a rough proxy for ~50 touched lines until the
+          // planner produces a real estimate.
+          estimatedLinesTouched: targetFileCount * 50,
+          fanOut: targetFileCount + requiresCount,
+          verificationKinds,
+        });
+
+        return {
+          ...task,
+          complexity: score.label,
+        };
+      }),
+    })),
   };
 }
 
