@@ -9,6 +9,7 @@ import {
   getTaskExecutionDetail,
   listEvalRunsForExecution,
   listMcpToolCallsForExecution,
+  markLatestModelDecisionStopped,
   updateEvalRun,
 } from "@vimbuspromax3000/db";
 import { resolveModelSlot } from "@vimbuspromax3000/policy-engine";
@@ -244,12 +245,33 @@ export function createEvaluatorService(options: EvaluatorServiceOptions) {
           retryCount: context.execution.retryCount,
         });
 
-        await updateEvalRun(prisma, evalRun.id, {
-          status: "completed",
-          aggregateScore,
-          threshold: AGGREGATE_PROCEED_THRESHOLD,
-          verdict: decision,
-          finishedAt: new Date(),
+        // VIM-44: persist the verdict on the EvalRun and, when the verdict
+        // is a non-pass (`fail | retry | escalate`), flip the latest
+        // ModelDecision cursor from `selected` → `stopped` in the SAME
+        // Prisma `$transaction`. This unblocks the VIM-30 retry runtime
+        // automatically — operators no longer need to manually advance
+        // the cursor between failed verifications and the next retry.
+        //
+        // Idempotency: `markLatestModelDecisionStopped` filters on
+        // `state: "selected"` so a re-entry (or a row already at
+        // `stopped`/`escalated`) is a clean no-op.
+        // Atomicity: if either op throws, the whole transaction rolls
+        // back so the verdict row + cursor stay consistent.
+        const shouldFlipCursor =
+          decision === "fail" || decision === "retry" || decision === "escalate";
+
+        await prisma.$transaction(async (tx) => {
+          await updateEvalRun(tx, evalRun.id, {
+            status: "completed",
+            aggregateScore,
+            threshold: AGGREGATE_PROCEED_THRESHOLD,
+            verdict: decision,
+            finishedAt: new Date(),
+          });
+
+          if (shouldFlipCursor) {
+            await markLatestModelDecisionStopped(tx, executionId);
+          }
         });
 
         await appendLoopEvent(prisma, {

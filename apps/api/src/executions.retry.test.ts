@@ -33,6 +33,7 @@ import {
   removeTempDir,
 } from "@vimbuspromax3000/db/testing";
 import { createMcpService } from "@vimbuspromax3000/mcp-client";
+import { createEvaluatorService, type JudgeGenerator } from "@vimbuspromax3000/evaluator";
 import { setupModelRegistry } from "@vimbuspromax3000/model-registry";
 import type { PrismaClient } from "@vimbuspromax3000/db/client";
 
@@ -305,6 +306,145 @@ describe("POST /executions/:id/retry (VIM-30)", () => {
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe("MODEL_SLOT_UNAVAILABLE");
   });
+});
+
+/**
+ * VIM-44 — `runEvaluation` auto-flips the latest `ModelDecision` cursor
+ * from `selected` → `stopped` whenever the persisted verdict is
+ * `fail | retry | escalate`. The follow-up `POST /executions/:id/retry`
+ * call should then advance the attempt window WITHOUT any manual
+ * operator nudge — proving the M1 retry loop is fully automated.
+ */
+describe("runEvaluation → POST /executions/:id/retry (VIM-44 auto-flip)", () => {
+  let prisma: PrismaClient;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    const isolated = await createIsolatedPrisma("vimbus-retry-flip-");
+    prisma = isolated.prisma;
+    tempDir = isolated.tempDir;
+  });
+
+  afterEach(async () => {
+    await prisma.$disconnect();
+    removeTempDir(tempDir);
+  });
+
+  test(
+    "verdict.fail flips cursor automatically; subsequent retry creates a second ModelDecision row without manual intervention",
+    async () => {
+      const env = { VIMBUS_TEST_KEY: "present" };
+      const { project, task } = await seedReadyTaskWithMcp(prisma, tempDir);
+
+      // Both executor slots resolve so the retry can advance.
+      await setupModelRegistry(prisma, {
+        projectId: project.id,
+        providerKey: "openai",
+        providerKind: "openai",
+        providerStatus: "active",
+        secretEnv: "VIMBUS_TEST_KEY",
+        modelName: "GPT Default",
+        modelSlug: "gpt-default",
+        capabilities: ["tools"],
+        slotKeys: ["executor_default"],
+      });
+      await setupModelRegistry(prisma, {
+        projectId: project.id,
+        providerKey: "openai-strong",
+        providerKind: "openai",
+        providerStatus: "active",
+        secretEnv: "VIMBUS_TEST_KEY",
+        modelName: "GPT Strong",
+        modelSlug: "gpt-strong",
+        capabilities: ["tools"],
+        slotKeys: ["executor_strong"],
+      });
+
+      // Seed branch + execution + an initial attempt-1 ModelDecision in
+      // `selected` state — exactly what `startTaskExecution` produces.
+      const branch = await prisma.taskBranch.create({
+        data: {
+          taskId: task.id,
+          name: "tg/retry-flip-branch",
+          base: "main",
+          state: "active",
+          currentHead: "abc123",
+        },
+      });
+      const execution = await prisma.taskExecution.create({
+        data: {
+          taskId: task.id,
+          branchId: branch.id,
+          status: "implementing",
+          retryCount: 0,
+          startedAt: new Date(),
+        },
+      });
+      await prisma.modelDecision.create({
+        data: {
+          projectId: project.id,
+          taskExecutionId: execution.id,
+          attempt: 1,
+          complexityLabel: task.complexity,
+          selectedSlot: "executor_default",
+          selectedModel: "openai:gpt-default",
+          reason: "initial",
+          state: "selected",
+        },
+      });
+
+      // Mock judge returns a low score so the eval verdict resolves to
+      // `fail` (rule-based outcome_correctness hard-fails first since no
+      // test runs are seeded). The point is to drive the persistence
+      // path that includes the auto-flip.
+      const failingGenerator: JudgeGenerator = async () => ({
+        score: 5,
+        reason: "mock fail for retry-flip contract",
+      });
+      const evaluatorService = createEvaluatorService({
+        prisma,
+        env,
+        generator: failingGenerator,
+      });
+
+      const evalRun = await evaluatorService.runEvaluation(execution.id);
+      expect(evalRun?.verdict).toBe("fail");
+
+      // VIM-44: the evaluator already flipped the cursor — operator is NOT
+      // expected to call markLatestDecisionStopped manually.
+      const latestAfterEval = await prisma.modelDecision.findFirst({
+        where: { taskExecutionId: execution.id },
+        orderBy: { attempt: "desc" },
+      });
+      expect(latestAfterEval?.state).toBe("stopped");
+
+      const api = createApp({ prisma, env });
+
+      // POST /executions/:id/retry should succeed with no operator nudge —
+      // it sees a `stopped` cursor and advances to attempt 2.
+      const retry = await api.fetch(
+        new Request(`http://localhost/executions/${execution.id}/retry`, { method: "POST" }),
+      );
+      expect(retry.status).toBe(200);
+      const body = (await retry.json()) as {
+        decision: { attempt: number; selectedSlot: string; state: string };
+      };
+      expect(body.decision.attempt).toBe(2);
+      expect(body.decision.selectedSlot).toBe("executor_default");
+      expect(body.decision.state).toBe("selected");
+
+      // Two ModelDecision rows now exist: the original (now stopped) and
+      // the new attempt-2 selection.
+      const decisions = await prisma.modelDecision.findMany({
+        where: { taskExecutionId: execution.id },
+        orderBy: { attempt: "asc" },
+      });
+      expect(decisions).toHaveLength(2);
+      expect(decisions[0]?.state).toBe("stopped");
+      expect(decisions[1]?.state).toBe("selected");
+    },
+    60000,
+  );
 });
 
 async function markLatestDecisionStopped(prisma: PrismaClient, executionId: string) {
