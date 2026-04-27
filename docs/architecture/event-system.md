@@ -71,7 +71,7 @@ SQLite v1 stores `payload` as JSON text. Application code validates payloads wit
 The CLI subscribes to:
 
 ```txt
-GET /events?projectId=<id>
+GET /events?projectId=<id>&stream=sse
 ```
 
 The API emits standard SSE frames:
@@ -82,4 +82,30 @@ id: <loop-event-id>
 data: {"taskExecutionId":"...","chunk":"..."}
 ```
 
-Clients must treat the database as the recovery source after reconnect.
+Idle connections receive a `: heartbeat` comment frame every 15 seconds (configurable
+through `ApiAppOptions.eventsSseConfig.heartbeatMs`) so reverse proxies and operator
+TUIs do not idle-time the stream out. The heartbeat is an SSE comment, so EventSource
+clients ignore it automatically.
+
+The bare `GET /events?projectId=<id>` JSON list is **deprecated since VIM-36 Sprint 1**.
+New callers should hit `GET /events/history?projectId=<id>` for the same JSON payload.
+The deprecated path is kept until the existing CLI commands migrate.
+
+Clients must treat the database as the recovery source after reconnect — both the SSE
+backlog replay (the first frames after subscription) and `/events/history` read from
+the same `LoopEvent` table.
+
+### Sprint 1 push fallback (followups for Sprint 2)
+
+VIM-36 Sprint 1 ships SSE on top of a 100ms repository poll keyed on `LoopEvent.id`.
+That hits the ~200ms delivery target on local dev, but Sprint 2 should:
+
+- Replace the poller with an in-process event bus that `appendLoopEvent` notifies
+  directly, so writes propagate without the 100ms tail.
+- Add a Postgres `LISTEN/NOTIFY` adapter once the API has a Postgres deployment, so
+  multi-process API instances share one event source.
+- Wire the 3-pane TUI live view (`apps/cli/src/live.ts` or equivalent) to consume
+  `/events?stream=sse` and render the Tasks / Control / Logs split. The CLI is
+  OpenTUI today (see `apps/cli/package.json`), so the live view will use OpenTUI
+  primitives rather than Ink.
+- Add a CLI snapshot test that replays a fixture event tape against the live view.

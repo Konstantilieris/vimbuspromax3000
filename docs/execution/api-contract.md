@@ -171,6 +171,11 @@ Strict eligibility failures return `422`:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/events?projectId=<id>` | List `LoopEvent` records as JSON. |
+| `GET` | `/events?projectId=<id>&stream=sse` | Subscribe to a Server-Sent Events stream of `LoopEvent` rows with a 15s heartbeat (since VIM-36). |
+| `GET` | `/events/history?projectId=<id>` | List `LoopEvent` records as JSON. Replaces the deprecated bare `/events` JSON path. |
+| `GET` | `/events?projectId=<id>` | **Deprecated since VIM-36 Sprint 1.** Returns the same JSON payload as `/events/history`. Existing CLI callers continue to work; new code should target `/events/history`. |
 
-The current slice returns JSON event history ordered by creation time. SSE is intentionally deferred until the CLI operator-console slice.
+VIM-36 Sprint 1 ships SSE on top of a 100ms repository poll keyed on `LoopEvent.id`,
+including a backlog replay so reconnecting clients recover state without re-querying.
+Sprint 2 swaps the poller for an in-process event bus (and later a Postgres
+`LISTEN/NOTIFY` adapter) to drop the 100ms tail and guarantee the sub-200ms target.
