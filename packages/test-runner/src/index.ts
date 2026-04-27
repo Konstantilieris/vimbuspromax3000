@@ -16,6 +16,7 @@ import {
   updateTaskBranch,
   updateTaskExecution,
   updateTestRun,
+  type TestRunPhase,
 } from "@vimbuspromax3000/db";
 
 export type TestRunnerEligibilityErrorCode =
@@ -49,8 +50,49 @@ export function isTestRunnerEligibilityError(error: unknown): error is TestRunne
   return error instanceof TestRunnerEligibilityError;
 }
 
+/**
+ * VIM-31 — abort code surfaced when {@link TestRunnerService.runExecutionVerificationIteration}
+ * detects that a logic verification test passed during the `pre_red` phase
+ * (i.e. against the empty / pre-edit branch state). The TDD invariant says
+ * no logic test may be green on an empty branch — that would mean the test
+ * is not actually exercising the not-yet-written behavior.
+ */
+export type TestRunnerIterationAbortCode = "tdd_invariant_violated";
+
+/**
+ * VIM-31 — result returned from one TDD iteration. Two TestRun rows persist
+ * per iteration (one per phase) tagged with the supplied `iterationIndex`.
+ *
+ * - When `preRedAborted === true`, only the `pre_red` rows were written and
+ *   `abortCode === 'tdd_invariant_violated'`. The agent loop should treat
+ *   this as a planning bug, not a retryable failure.
+ * - When `preRedAborted === false`, both phases ran. `hasFailure` reflects
+ *   whether the `post_green` phase had any failed item — this is the signal
+ *   the agent loop forwards to VIM-30's existing retry path.
+ */
+export type TestRunnerIterationResult = {
+  iterationIndex: number;
+  preRedAborted: boolean;
+  abortCode?: TestRunnerIterationAbortCode;
+  hasFailure: boolean;
+  testRuns: Awaited<ReturnType<typeof listTestRuns>>;
+};
+
 export type TestRunnerService = {
   runExecutionVerification(input: { executionId: string }): Promise<Awaited<ReturnType<typeof listTestRuns>>>;
+  /**
+   * VIM-31 — TDD-aware entry point. Drives one iteration with two phases:
+   * `pre_red` (against the empty / pre-edit branch state) and `post_green`
+   * (after the agent loop has applied its edits). Persists exactly two
+   * TestRun rows per command-backed item per iteration (one per phase).
+   *
+   * Only `logic`-kind items are evaluated against the TDD invariant.
+   * Visual / evidence items run only during `post_green`.
+   */
+  runExecutionVerificationIteration(input: {
+    executionId: string;
+    iterationIndex: number;
+  }): Promise<TestRunnerIterationResult>;
   listExecutionTestRuns(executionId: string): Promise<Awaited<ReturnType<typeof listTestRuns>>>;
 };
 
@@ -60,6 +102,17 @@ type CommandRunnerInput = {
   executionId: string;
   verificationItemId: string;
   orderIndex: number;
+  /**
+   * VIM-31 — optional phase tag. When omitted, the runner is invoked from
+   * the legacy single-shot {@link TestRunnerService.runExecutionVerification}
+   * path, which behaves like `post_green` for backward compatibility.
+   */
+  phase?: TestRunPhase;
+  /**
+   * VIM-31 — optional 1-based iteration index. Omitted for the legacy
+   * single-shot path; populated by the TDD iteration entry point.
+   */
+  iterationIndex?: number;
 };
 
 type CommandRunnerResult = {
@@ -87,6 +140,153 @@ export function createTestRunnerService(options: {
       return listTestRuns(prisma, {
         taskExecutionId: executionId,
       });
+    },
+
+    async runExecutionVerificationIteration(input) {
+      const execution = await requireExecutionVerificationContext(prisma, input.executionId);
+      const project = execution.task.epic.project;
+      const verificationPlan = execution.latestApprovedVerificationPlan;
+
+      if (!verificationPlan) {
+        throw new Error(`Execution ${execution.id} does not have an approved verification plan.`);
+      }
+
+      if (!["implementing", "verifying"].includes(execution.status)) {
+        throw new Error(`Execution ${execution.id} is not in a runnable state for verification.`);
+      }
+
+      if (!["executing", "testing"].includes(execution.task.status)) {
+        throw new Error(`Task ${execution.task.id} is not in a runnable state for verification.`);
+      }
+
+      const items = verificationPlan.items;
+
+      if (items.length === 0) {
+        throw new TestRunnerEligibilityError({
+          code: "NO_APPROVED_VERIFICATION_ITEMS",
+          message: "This execution has no approved verification items to run.",
+          items: [],
+        });
+      }
+
+      const unsupportedItems = items
+        .filter((item) => !hasExecutableCommand(item.command) && !isVisualVerificationDispatchItem(item))
+        .map((item) => ({
+          id: item.id,
+          kind: item.kind,
+          title: item.title,
+        }));
+
+      if (unsupportedItems.length > 0) {
+        throw new TestRunnerEligibilityError({
+          code: "UNSUPPORTED_VERIFICATION_ITEMS",
+          message: "This execution contains approved verification items that cannot be run by the command runner.",
+          items: unsupportedItems,
+        });
+      }
+
+      const iterationIndex = input.iterationIndex;
+
+      // pre_red: only command-backed items participate. Visual items are
+      // checked only in post_green because their result depends on the final
+      // branch state — running them on an empty branch would just re-block.
+      let preRedSawLogicPass = false;
+      for (const item of items) {
+        if (!hasExecutableCommand(item.command)) {
+          continue;
+        }
+
+        const outcome = await runCommandItem({
+          prisma,
+          execution,
+          project,
+          item,
+          phase: "pre_red",
+          iterationIndex,
+          commandRunner,
+        });
+
+        if (outcome.testStatus === "passed" && isLogicKind(item.kind)) {
+          preRedSawLogicPass = true;
+        }
+      }
+
+      if (preRedSawLogicPass) {
+        // TDD invariant violation — abort the iteration without running
+        // post_green. The agent loop should treat this as a planning bug.
+        await prisma.$transaction(async (tx) => {
+          await appendLoopEvent(tx, {
+            projectId: project.id,
+            taskExecutionId: execution.id,
+            type: "task.failed",
+            payload: {
+              taskId: execution.task.id,
+              code: "TDD_INVARIANT_VIOLATED",
+              reason:
+                "TDD invariant violation: a logic verification test passed during pre_red.",
+              iterationIndex,
+            },
+          });
+        });
+
+        const aborted = await listTestRuns(prisma, {
+          taskExecutionId: execution.id,
+          iterationIndex,
+        });
+
+        return {
+          iterationIndex,
+          preRedAborted: true,
+          abortCode: "tdd_invariant_violated",
+          hasFailure: true,
+          testRuns: aborted,
+        };
+      }
+
+      // post_green: every item runs (command-backed + visual).
+      let hasFailure = false;
+      for (const item of items) {
+        if (!hasExecutableCommand(item.command)) {
+          const result = await runVisualVerificationItem({
+            prisma,
+            execution,
+            project,
+            item,
+          });
+
+          if (result.status !== "passed") {
+            hasFailure = true;
+          }
+
+          continue;
+        }
+
+        const outcome = await runCommandItem({
+          prisma,
+          execution,
+          project,
+          item,
+          phase: "post_green",
+          iterationIndex,
+          commandRunner,
+        });
+
+        if (outcome.testStatus !== "passed") {
+          hasFailure = true;
+        }
+      }
+
+      const completed = await listTestRuns(prisma, {
+        taskExecutionId: execution.id,
+        iterationIndex,
+      });
+
+      return {
+        iterationIndex,
+        preRedAborted: false,
+        hasFailure,
+        testRuns: completed,
+      };
     },
 
     async runExecutionVerification(input) {
@@ -356,6 +556,174 @@ export function createTestRunnerService(options: {
       });
     },
   };
+}
+
+/**
+ * VIM-31 — runs one command-backed verification item for a single phase
+ * (`pre_red` or `post_green`) within a TDD iteration. Persists the TestRun
+ * row tagged with the supplied `phase` + `iterationIndex`, updates the
+ * verification item status, emits the matching loop events, and writes the
+ * deterministic meta.json artifact under
+ * `.artifacts/executions/<id>/test-runs/<iter>-<phase>-<order>-<itemId>/`
+ * so phase artifacts never overwrite each other.
+ */
+async function runCommandItem(input: {
+  prisma: PrismaClient;
+  execution: ExecutionVerificationContext;
+  project: ExecutionVerificationContext["task"]["epic"]["project"];
+  item: VerificationRunItem;
+  phase: TestRunPhase;
+  iterationIndex?: number;
+  commandRunner: (input: CommandRunnerInput) => CommandRunnerResult;
+}) {
+  const command = input.item.command?.trim() ?? "";
+  const startedAt = new Date();
+  const phase = input.phase;
+  const iterationIndex = input.iterationIndex;
+
+  const testRun = await input.prisma.$transaction(async (tx) => {
+    const created = await createTestRun(tx, {
+      taskExecutionId: input.execution.id,
+      verificationItemId: input.item.id,
+      command,
+      status: "running",
+      startedAt,
+      phase,
+      ...(typeof iterationIndex === "number" ? { iterationIndex } : {}),
+    });
+
+    await tx.verificationItem.update({
+      where: { id: input.item.id },
+      data: {
+        status: "running",
+      },
+    });
+
+    await appendLoopEvent(tx, {
+      projectId: input.project.id,
+      taskExecutionId: input.execution.id,
+      type: "test.started",
+      payload: {
+        taskId: input.execution.task.id,
+        verificationItemId: input.item.id,
+        testRunId: created.id,
+        command,
+        phase,
+        iterationIndex: iterationIndex ?? null,
+      },
+    });
+
+    return created;
+  });
+
+  const result = input.commandRunner({
+    command,
+    rootPath: input.project.rootPath,
+    executionId: input.execution.id,
+    verificationItemId: input.item.id,
+    orderIndex: input.item.orderIndex,
+    phase,
+    ...(typeof iterationIndex === "number" ? { iterationIndex } : {}),
+  });
+  const finishedAt = new Date();
+  const testStatus: "passed" | "failed" = result.exitCode === 0 ? "passed" : "failed";
+  const itemStatus = result.exitCode === 0 ? "green" : "failed";
+
+  await input.prisma.$transaction(async (tx) => {
+    await updateTestRun(tx, testRun.id, {
+      status: testStatus,
+      exitCode: result.exitCode,
+      stdoutPath: result.stdoutPath,
+      stderrPath: result.stderrPath,
+      finishedAt,
+    });
+
+    await tx.verificationItem.update({
+      where: { id: input.item.id },
+      data: {
+        status: itemStatus,
+      },
+    });
+
+    if (result.stdout.trim().length > 0) {
+      await appendLoopEvent(tx, {
+        projectId: input.project.id,
+        taskExecutionId: input.execution.id,
+        type: "test.stdout",
+        payload: {
+          taskId: input.execution.task.id,
+          verificationItemId: input.item.id,
+          testRunId: testRun.id,
+          path: result.stdoutPath,
+          chunk: result.stdout,
+          phase,
+          iterationIndex: iterationIndex ?? null,
+        },
+      });
+    }
+
+    if (result.stderr.trim().length > 0) {
+      await appendLoopEvent(tx, {
+        projectId: input.project.id,
+        taskExecutionId: input.execution.id,
+        type: "test.stderr",
+        payload: {
+          taskId: input.execution.task.id,
+          verificationItemId: input.item.id,
+          testRunId: testRun.id,
+          path: result.stderrPath,
+          chunk: result.stderr,
+          phase,
+          iterationIndex: iterationIndex ?? null,
+        },
+      });
+    }
+
+    await appendLoopEvent(tx, {
+      projectId: input.project.id,
+      taskExecutionId: input.execution.id,
+      type: "test.finished",
+      payload: {
+        taskId: input.execution.task.id,
+        verificationItemId: input.item.id,
+        testRunId: testRun.id,
+        exitCode: result.exitCode,
+        status: testStatus,
+        phase,
+        iterationIndex: iterationIndex ?? null,
+      },
+    });
+  });
+
+  writeTestRunMetaFile({
+    artifactDirectory: result.artifactDirectory,
+    executionId: input.execution.id,
+    verificationItemId: input.item.id,
+    orderIndex: input.item.orderIndex,
+    kind: input.item.kind,
+    title: input.item.title,
+    command,
+    startedAt,
+    finishedAt,
+    exitCode: result.exitCode,
+    status: testStatus,
+  });
+
+  return {
+    testRunId: testRun.id,
+    testStatus,
+  };
+}
+
+/**
+ * VIM-31 — `logic` is the only verification kind that participates in the
+ * pre_red invariant check. Other kinds (visual, evidence, integration,
+ * typecheck) are exempt because their pre_red semantics either don't apply
+ * (visual asset checks need final state) or are out of scope for the TDD
+ * red invariant.
+ */
+function isLogicKind(kind: string): boolean {
+  return kind.trim().toLowerCase() === "logic";
 }
 
 async function runVisualVerificationItem(input: {

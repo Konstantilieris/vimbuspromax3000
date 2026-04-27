@@ -279,12 +279,16 @@ model TestRun {
   exitCode           Int?
   stdoutPath         String?
   stderrPath         String?
+  iterationIndex     Int       @default(1)
+  phase              String    @default("post_green")
   startedAt          DateTime?
   finishedAt         DateTime?
   createdAt          DateTime  @default(now())
 
   taskExecution   TaskExecution     @relation(fields: [taskExecutionId], references: [id])
   verificationItem VerificationItem? @relation(fields: [verificationItemId], references: [id])
+
+  @@index([taskExecutionId, iterationIndex, phase])
 }
 
 model PatchReview {

@@ -65,6 +65,57 @@ export class RetryExecutionError extends Error {
   }
 }
 
+/**
+ * VIM-31 — single-iteration outcome handed to the TDD loop wrapper.
+ *
+ * Mirrors the shape returned by `TestRunnerService.runExecutionVerificationIteration`
+ * but stays decoupled from the `@vimbuspromax3000/test-runner` package so
+ * the agent package keeps its existing dependency footprint (no circular
+ * imports between agent / test-runner / evaluator).
+ */
+export type TddIterationOutcome = {
+  iterationIndex: number;
+  preRedAborted: boolean;
+  abortCode?: string;
+  hasFailure: boolean;
+};
+
+/**
+ * VIM-31 — callback invoked once per TDD iteration. The host wires this
+ * to `TestRunnerService.runExecutionVerificationIteration` (see
+ * `apps/api` and CLI for production wiring).
+ */
+export type TddIterationRunner = (input: {
+  executionId: string;
+  iterationIndex: number;
+}) => Promise<TddIterationOutcome>;
+
+/**
+ * VIM-31 — optional evaluator hook. When supplied, the loop wrapper calls
+ * this between a failed `post_green` and the retry path so VIM-44's
+ * evaluator can flip the latest ModelDecision to `stopped` and let
+ * `retryExecution` advance the attempt window.
+ *
+ * Returns the verdict so the loop can short-circuit on `stop` without
+ * forcing another retry.
+ */
+export type TddEvaluatorHook = (executionId: string) => Promise<{
+  verdict?: "proceed" | "retry" | "stop";
+}>;
+
+/**
+ * VIM-31 — summary of one TDD loop. The acceptance criteria require that
+ * each iteration writes two TestRun rows (red + green) with a monotonically
+ * increasing `iterationIndex`; the loop here is the wrapper that increments
+ * the index across iterations.
+ */
+export type TddLoopResult = {
+  iterations: TddIterationOutcome[];
+  outcome: "passed" | "tdd_invariant_violated" | "max_iterations" | "retry_terminated";
+  /** Last iteration's outcome (for convenience). */
+  lastIteration: TddIterationOutcome | null;
+};
+
 export type ExecutionService = {
   getTaskBranch(taskId: string): Promise<Awaited<ReturnType<typeof getTaskBranchDetail>>>;
   prepareTaskBranch(input: { taskId: string }): Promise<Awaited<ReturnType<typeof getTaskBranchDetail>>>;
@@ -98,6 +149,40 @@ export type ExecutionService = {
     patchReview: NonNullable<Awaited<ReturnType<typeof getLatestPatchReview>>>;
     execution: NonNullable<Awaited<ReturnType<typeof getTaskExecutionDetail>>>;
   }>;
+  /**
+   * VIM-31 — drive an iterative TDD red/green loop on top of the existing
+   * agent execution + verification + retry primitives. Each iteration:
+   *
+   *   1. Calls the supplied `runIteration` callback (wired by the host to
+   *      `TestRunnerService.runExecutionVerificationIteration`). That call
+   *      writes two TestRun rows per command-backed item — one pre_red
+   *      (against the empty / pre-edit branch state) and one post_green
+   *      (after the agent loop applies its edits) — both tagged with the
+   *      monotonically increasing `iterationIndex`.
+   *   2. If the iteration aborts as `tdd_invariant_violated`, returns
+   *      immediately. The agent loop should treat that as a planning bug.
+   *   3. If `post_green` failed, calls the optional evaluator hook (which
+   *      flips the latest ModelDecision to `stopped`), then dispatches to
+   *      VIM-30's existing `retryExecution` path so the next iteration
+   *      runs under the next attempt's slot.
+   *   4. On `terminated` retry (attempt budget exhausted) or when the
+   *      iteration succeeds, the loop stops.
+   *
+   * The wrapper is intentionally thin: it never edits the evaluator or
+   * the retry transaction (those are owned by VIM-44 / VIM-30). It just
+   * sequences the three public entry points already on this service +
+   * the test-runner.
+   */
+  driveTddLoop(
+    input: {
+      executionId: string;
+      maxIterations?: number;
+    },
+    callbacks: {
+      runIteration: TddIterationRunner;
+      evaluate?: TddEvaluatorHook;
+    },
+  ): Promise<TddLoopResult>;
 };
 
 /**
@@ -765,6 +850,72 @@ export function createExecutionService(options: {
       return {
         patchReview: updatedPatchReview,
         execution: updatedExecution,
+      };
+    },
+
+    async driveTddLoop(input, callbacks) {
+      const maxIterations = input.maxIterations ?? 3;
+      const iterations: TddIterationOutcome[] = [];
+      const service = this;
+      let lastIteration: TddIterationOutcome | null = null;
+
+      for (let iterationIndex = 1; iterationIndex <= maxIterations; iterationIndex += 1) {
+        const outcome = await callbacks.runIteration({
+          executionId: input.executionId,
+          iterationIndex,
+        });
+
+        iterations.push(outcome);
+        lastIteration = outcome;
+
+        if (outcome.preRedAborted) {
+          // TDD invariant violation — the loop stops without retrying.
+          return {
+            iterations,
+            outcome: "tdd_invariant_violated",
+            lastIteration,
+          };
+        }
+
+        if (!outcome.hasFailure) {
+          return {
+            iterations,
+            outcome: "passed",
+            lastIteration,
+          };
+        }
+
+        // post_green failed — feed VIM-30's retry path. The optional
+        // evaluator hook lets VIM-44's evaluator flip the latest
+        // ModelDecision to `stopped` so retryExecution allocates the next
+        // attempt; without it, retryExecution stays idempotent on a
+        // `selected` decision and the loop will stall — that is intentional
+        // and matches the existing single-shot semantics.
+        if (callbacks.evaluate) {
+          const verdict = await callbacks.evaluate(input.executionId);
+          if (verdict.verdict === "stop") {
+            return {
+              iterations,
+              outcome: "retry_terminated",
+              lastIteration,
+            };
+          }
+        }
+
+        const retry = await service.retryExecution(input.executionId);
+        if (retry.terminated) {
+          return {
+            iterations,
+            outcome: "retry_terminated",
+            lastIteration,
+          };
+        }
+      }
+
+      return {
+        iterations,
+        outcome: "max_iterations",
+        lastIteration,
       };
     },
   };
