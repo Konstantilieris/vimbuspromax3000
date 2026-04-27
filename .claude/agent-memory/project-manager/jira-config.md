@@ -1,6 +1,6 @@
 ---
 name: jira-config
-description: VimbusProMax3000 Jira configuration — issue types, field constraints, site URL, and logical project scope
+description: Vimbus Jira configuration — project key, issue types, field constraints, site URL, cloud ID
 type: reference
 ---
 
@@ -8,6 +8,7 @@ Jira site: apollonadmin.atlassian.net
 Jira container project key: VIM
 Logical project: VimbusProMax3000 / TaskGoblin
 Cloud ID: a9dc8917-e4cb-48be-bf4f-84b1f381906e
+Project style: team-managed (next-gen software)
 
 **Vimbus issue scope JQL:**
 `project = VIM`

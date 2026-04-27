@@ -18,6 +18,7 @@ type: project
 **Jira container project key:** VIM
 **Logical project scope:** VimbusProMax3000 / TaskGoblin (project is Vimbus-dedicated; no label filter required)
 **Jira site URL:** https://apollonadmin.atlassian.net
+**Cloud ID:** a9dc8917-e4cb-48be-bf4f-84b1f381906e
 
 > Note: All numbers above are starting estimates. Update after first sprint retrospective.
 

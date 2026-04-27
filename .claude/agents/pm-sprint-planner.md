@@ -61,6 +61,21 @@ Use a table for sprint items:
 ### Velocity Assumptions
 
 ### Risks and Rebalancing Notes
+### Risks
+- Sprints that are near capacity
+- Long dependency chains that reduce flexibility
+- Items that may need to be re-estimated after earlier work
+
+## Tools Available
+
+- **ToolSearch** — Discover Atlassian MCP tools
+- **Atlassian MCP** (read-only) — Query existing sprint data via JQL. `{KEY}` defaults to `VIM` for VimbusProMax3000:
+  - Current sprint items: `project = {KEY} AND sprint in openSprints()`
+  - Past velocity: `project = {KEY} AND sprint in closedSprints() AND resolved IS NOT EMPTY`
+
+## Output Constraints
+
+Keep your output under 2500 words. Use tables over prose. The parent needs to fit your output into the next sub-agent's context. The skill mapping and risk summary sections add ~300-500 words when applicable.
 
 ## Rules
 
