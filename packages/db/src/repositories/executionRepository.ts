@@ -270,6 +270,32 @@ export async function listModelDecisionsForExecution(db: DatabaseClient, taskExe
   });
 }
 
+/**
+ * VIM-44 — flip the cursor for a task execution from `selected` → `stopped`.
+ *
+ * The retry runtime treats a `selected` cursor as "an attempt is still in
+ * flight" (idempotent no-op on duplicate POST). After a failing eval verdict
+ * the evaluator calls this helper inside its own `$transaction` so the next
+ * retry can advance the attempt window without manual operator intervention.
+ *
+ * Idempotent by design: the `where: { state: "selected" }` filter means a row
+ * already at `stopped` (or `escalated`) is left untouched, and an empty match
+ * set produces a clean `count: 0` no-op.
+ *
+ * Returned `count` reflects how many rows were flipped (0 or 1 in practice —
+ * the runtime maintains the invariant that at most one ModelDecision per
+ * execution is in `selected` state at a time).
+ */
+export async function markLatestModelDecisionStopped(
+  db: DatabaseClient,
+  taskExecutionId: string,
+) {
+  return db.modelDecision.updateMany({
+    where: { taskExecutionId, state: "selected" },
+    data: { state: "stopped" },
+  });
+}
+
 function parseJson(value: string | null) {
   if (!value) {
     return null;
