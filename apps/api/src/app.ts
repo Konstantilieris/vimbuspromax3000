@@ -31,6 +31,7 @@ import {
   createRegressionBaseline,
   getActiveRegressionBaseline,
   getBenchmarkScenario,
+  getDefaultLoopEventBus,
   getEvalRun,
   getMcpToolCallDetail,
   getSourceAsset,
@@ -55,6 +56,7 @@ import {
   ingestProjectSourceAsset,
   persistPlannerProposal,
   setMcpServerCredential,
+  type LoopEventBus,
   type PrismaClient,
   updateLangSmithTraceLink,
   updateMcpServerStatus,
@@ -136,9 +138,10 @@ export type EventsSseConfig = {
    */
   heartbeatMs?: number;
   /**
-   * Polling interval used by the Sprint 1 push fallback. Sprint 2 will swap
-   * the polling source for an in-process / Postgres LISTEN-NOTIFY event bus
-   * so we can drop this knob and guarantee sub-200ms delivery.
+   * @deprecated since VIM-36 Sprint 2 — the SSE handler now consumes an
+   * in-process event bus and no longer polls the repository. The option is
+   * preserved so existing callers (notably the Sprint 1 SSE test that pinned
+   * a fast heartbeat) keep type-checking.
    */
   pollIntervalMs?: number;
 };
@@ -151,6 +154,14 @@ export type ApiAppOptions = {
   testRunnerService?: TestRunnerService;
   evaluatorService?: EvaluatorService;
   eventsSseConfig?: EventsSseConfig;
+  /**
+   * VIM-36 Sprint 2 — inject a non-default event bus (mostly for tests). The
+   * bus is the source of truth for live SSE pushes; production wiring keeps
+   * the process-wide singleton from `getDefaultLoopEventBus()` so any
+   * `appendLoopEvent` call (including from sibling packages and the VIM-30
+   * retry route) lands on the same fan-out.
+   */
+  loopEventBus?: LoopEventBus;
   /**
    * VIM-29 Sprint 2 — overrides the agent generator factory wired into
    * `createExecutionService`. Tests inject a fake (or AI SDK
@@ -169,7 +180,6 @@ export type ApiAppOptions = {
 };
 
 const DEFAULT_EVENTS_HEARTBEAT_MS = 15_000;
-const DEFAULT_EVENTS_POLL_INTERVAL_MS = 100;
 const DEFAULT_AGENT_LOOP_MAX_TURNS = 25;
 
 export function createApp(options: ApiAppOptions = {}) {
@@ -198,7 +208,7 @@ export function createApp(options: ApiAppOptions = {}) {
   const mcpService = createMcpService({ prisma });
   const evaluatorService = options.evaluatorService ?? createEvaluatorService({ prisma, env });
   const eventsHeartbeatMs = options.eventsSseConfig?.heartbeatMs ?? DEFAULT_EVENTS_HEARTBEAT_MS;
-  const eventsPollIntervalMs = options.eventsSseConfig?.pollIntervalMs ?? DEFAULT_EVENTS_POLL_INTERVAL_MS;
+  const loopEventBus = options.loopEventBus ?? getDefaultLoopEventBus();
 
   app.onError((error, context) =>
     context.json(
@@ -813,21 +823,58 @@ export function createApp(options: ApiAppOptions = {}) {
     const streamMode = context.req.query("stream");
 
     if (streamMode === "sse") {
-      // VIM-36 Sprint 1: SSE live stream. Sprint 2 swaps the polling source
-      // out for an in-process / Postgres LISTEN-NOTIFY bus to guarantee the
-      // sub-200ms delivery target without the 100ms tail from the poller.
+      // VIM-36 Sprint 2: SSE live stream backed by an in-process event bus.
+      // `appendLoopEvent` publishes synchronously after the row commits, so
+      // new events land here within the same tick (well under the 200ms
+      // delivery acceptance budget). The 100ms poller from Sprint 1 is gone;
+      // a future Postgres LISTEN/NOTIFY adapter can plug in behind the same
+      // `loopEventBus.subscribe` contract.
       return streamSSE(context, async (sse) => {
         const seenEventIds = new Set<string>();
+        type Pending =
+          | { kind: "event"; event: import("@vimbuspromax3000/shared").LoopEvent }
+          | { kind: "heartbeat" };
+        const queue: Pending[] = [];
+        let resolveWaiter: (() => void) | undefined;
+
+        const wakeWaiter = () => {
+          const resolve = resolveWaiter;
+          resolveWaiter = undefined;
+          resolve?.();
+        };
+
+        const enqueue = (item: Pending) => {
+          queue.push(item);
+          wakeWaiter();
+        };
+
+        const unsubscribe = loopEventBus.subscribe(
+          { projectId, taskExecutionId },
+          (event) => {
+            if (seenEventIds.has(event.id)) return;
+            seenEventIds.add(event.id);
+            enqueue({ kind: "event", event });
+          },
+        );
+
+        // Heartbeat is independent of event traffic so idle proxies stay
+        // happy. A `setInterval` is fine because we tear it down on abort.
+        const heartbeatTimer = setInterval(() => {
+          enqueue({ kind: "heartbeat" });
+        }, eventsHeartbeatMs);
 
         // Replay backlog so reconnecting clients don't lose context. The
         // event-system contract (docs/architecture/event-system.md) treats
-        // the database as the recovery source after reconnect.
+        // the database as the recovery source after reconnect. We do this
+        // AFTER subscribing so any concurrent insert is captured by the bus
+        // and de-duped via `seenEventIds`.
         const backlog = await listLoopEvents(prisma, {
           projectId,
           taskExecutionId,
           limit: 200,
         });
         for (const event of backlog) {
+          if (seenEventIds.has(event.id)) continue;
           seenEventIds.add(event.id);
           await sse.writeSSE({
             event: event.type,
@@ -836,33 +883,47 @@ export function createApp(options: ApiAppOptions = {}) {
           });
         }
 
-        let lastHeartbeatAt = Date.now();
         const aborted = () => sse.aborted || sse.closed;
 
-        while (!aborted()) {
-          const events = await listLoopEvents(prisma, {
-            projectId,
-            taskExecutionId,
-            limit: 200,
-          });
-          for (const event of events) {
-            if (seenEventIds.has(event.id)) continue;
-            seenEventIds.add(event.id);
-            await sse.writeSSE({
-              event: event.type,
-              id: event.id,
-              data: JSON.stringify(event),
-            });
-          }
+        try {
+          while (!aborted()) {
+            if (queue.length === 0) {
+              await new Promise<void>((resolve) => {
+                resolveWaiter = resolve;
+                // Race against abort so a closing client doesn't wedge here.
+                const abortPoll = setInterval(() => {
+                  if (aborted()) {
+                    clearInterval(abortPoll);
+                    wakeWaiter();
+                  }
+                }, 50);
+                // Cleanup the abort poll once the waiter resolves normally.
+                const originalResolve = resolveWaiter;
+                resolveWaiter = () => {
+                  clearInterval(abortPoll);
+                  originalResolve?.();
+                };
+              });
+            }
 
-          if (Date.now() - lastHeartbeatAt >= eventsHeartbeatMs) {
-            // SSE comment frame: clients ignore it, but it keeps proxies and
-            // load balancers from idling the connection out.
-            await sse.write(": heartbeat\n\n");
-            lastHeartbeatAt = Date.now();
+            while (queue.length > 0 && !aborted()) {
+              const next = queue.shift()!;
+              if (next.kind === "heartbeat") {
+                // SSE comment frame: clients ignore it, but it keeps proxies
+                // and load balancers from idling the connection out.
+                await sse.write(": heartbeat\n\n");
+              } else {
+                await sse.writeSSE({
+                  event: next.event.type,
+                  id: next.event.id,
+                  data: JSON.stringify(next.event),
+                });
+              }
+            }
           }
-
-          await sse.sleep(eventsPollIntervalMs);
+        } finally {
+          clearInterval(heartbeatTimer);
+          unsubscribe();
         }
       });
     }
