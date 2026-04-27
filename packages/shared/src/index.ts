@@ -533,6 +533,7 @@ export const LOOP_EVENT_TYPES = [
   "branch.created",
   "branch.switched",
   "agent.step.started",
+  "agent.step.completed",
   "agent.tool.requested",
   "agent.tool.completed",
   "mcp.tools.discovered",

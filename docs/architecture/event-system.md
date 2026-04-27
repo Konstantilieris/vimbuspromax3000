@@ -36,6 +36,7 @@ SQLite v1 stores `payload` as JSON text. Application code validates payloads wit
 | `branch.created` | Task branch is created. |
 | `branch.switched` | Workspace switches to a task branch. |
 | `agent.step.started` | Agent step begins. |
+| `agent.step.completed` | Agent step finishes (status reflects success/failure and stop reason). |
 | `agent.tool.requested` | Agent requests a tool call. |
 | `agent.tool.completed` | Tool call completes. |
 | `mcp.tools.discovered` | MCP client discovers the task-allowed tool catalog. |
