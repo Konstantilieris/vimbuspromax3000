@@ -12,6 +12,56 @@ import {
   type ModelSlotKey,
   type ResolvedModelSnapshot,
 } from "@vimbuspromax3000/shared";
+import { isComplexityLabel, type ComplexityLabel } from "@vimbuspromax3000/task-intel";
+
+export type ComplexityAwareSlotInput = {
+  requestedSlotKey: ModelSlotKey;
+  complexity: ComplexityLabel | string | null | undefined;
+};
+
+export type ComplexityAwareSlotDecision = {
+  slotKey: ModelSlotKey;
+  escalated: boolean;
+  reason: string;
+};
+
+/**
+ * Pure helper: given the slot the caller asked for and the complexity label
+ * the planner persisted on the task, return the slot the policy engine should
+ * actually resolve.
+ *
+ * Sprint 3 / VIM-35 narrow rule: only `executor_default` can be escalated, and
+ * only by `complexity === "high"`. All other slot keys pass through unchanged
+ * so this helper does not collide with the attempt-based escalation logic
+ * VIM-30 is layering on top.
+ */
+export function resolveSlotForComplexity(
+  input: ComplexityAwareSlotInput,
+): ComplexityAwareSlotDecision {
+  if (input.requestedSlotKey !== "executor_default") {
+    return {
+      slotKey: input.requestedSlotKey,
+      escalated: false,
+      reason: `Slot ${input.requestedSlotKey} is not an executor slot; complexity routing skipped.`,
+    };
+  }
+
+  const normalized = isComplexityLabel(input.complexity) ? input.complexity : "medium";
+
+  if (normalized === "high") {
+    return {
+      slotKey: "executor_strong",
+      escalated: true,
+      reason: "Routed to executor_strong because complexity=high.",
+    };
+  }
+
+  return {
+    slotKey: "executor_default",
+    escalated: false,
+    reason: `Routed to executor_default for complexity=${normalized}.`,
+  };
+}
 
 type CandidateValidation =
   | {
@@ -24,62 +74,85 @@ type CandidateValidation =
       message: string;
     };
 
+/**
+ * Local extension of `ModelResolutionRequest` so callers can pass through the
+ * complexity label persisted on the task without bloating the shared type.
+ * The field is optional and defaults to `medium` (no escalation) when absent
+ * so existing callers keep working.
+ */
+export type ModelResolutionRequestWithComplexity = ModelResolutionRequest & {
+  complexity?: ComplexityLabel | string | null;
+};
+
 export async function resolveModelSlot(
   prisma: PrismaClient,
-  input: ModelResolutionRequest,
+  input: ModelResolutionRequestWithComplexity,
   env: Record<string, string | undefined> = process.env,
 ): Promise<ModelResolutionResult> {
   const requiredCapabilities = [...(input.requiredCapabilities ?? [])];
+  const complexityDecision = resolveSlotForComplexity({
+    requestedSlotKey: input.slotKey,
+    complexity: input.complexity ?? null,
+  });
+  const effectiveSlotKey = complexityDecision.slotKey;
 
   await emitModelEvent(prisma, {
     projectId: input.projectId,
     taskExecutionId: input.taskExecutionId,
     type: "model.resolution.requested",
     payload: {
-      slotKey: input.slotKey,
+      slotKey: effectiveSlotKey,
+      requestedSlotKey: input.slotKey,
+      complexity: input.complexity ?? null,
+      escalated: complexityDecision.escalated,
       requiredCapabilities,
     },
   });
 
-  const slot = await resolveSlotBase(prisma, input.projectId, input.slotKey);
+  const effectiveInput: ModelResolutionRequest = {
+    ...input,
+    slotKey: effectiveSlotKey,
+  };
+
+  const slot = await resolveSlotBase(prisma, input.projectId, effectiveSlotKey);
 
   if (!slot) {
-    return fail(prisma, input, "slot_missing", `Model slot ${input.slotKey} has not been seeded.`, requiredCapabilities);
+    return fail(prisma, effectiveInput, "slot_missing", `Model slot ${effectiveSlotKey} has not been seeded.`, requiredCapabilities);
   }
 
   if (!slot.primaryModel && !slot.fallbackModel) {
-    return fail(prisma, input, "slot_unassigned", `Model slot ${input.slotKey} is not assigned.`, requiredCapabilities);
+    return fail(prisma, effectiveInput, "slot_unassigned", `Model slot ${effectiveSlotKey} is not assigned.`, requiredCapabilities);
   }
 
   const primary = validateCandidate(slot.primaryModel, requiredCapabilities, env);
 
   if (primary.ok) {
-    const snapshot = toSnapshot(input.slotKey, primary.value, false, requiredCapabilities);
-    await emitSuccess(prisma, input, snapshot);
+    const snapshot = toSnapshot(effectiveSlotKey, primary.value, false, requiredCapabilities);
+    await emitSuccess(prisma, effectiveInput, snapshot);
     return { ok: true, value: snapshot };
   }
 
   const fallback = validateCandidate(slot.fallbackModel, requiredCapabilities, env);
 
   if (fallback.ok) {
-    const snapshot = toSnapshot(input.slotKey, fallback.value, true, requiredCapabilities);
+    const snapshot = toSnapshot(effectiveSlotKey, fallback.value, true, requiredCapabilities);
     await emitModelEvent(prisma, {
       projectId: input.projectId,
       taskExecutionId: input.taskExecutionId,
       type: "model.fallback.used",
       payload: {
-        slotKey: input.slotKey,
+        slotKey: effectiveSlotKey,
         primaryFailure: primary,
         resolvedModel: snapshot.concreteModelName,
       },
     });
-    await emitSuccess(prisma, input, snapshot);
+    await emitSuccess(prisma, effectiveInput, snapshot);
     return { ok: true, value: snapshot };
   }
 
   const finalFailure = slot.fallbackModel ? fallback : primary;
 
-  return fail(prisma, input, finalFailure.code, finalFailure.message, requiredCapabilities);
+  return fail(prisma, effectiveInput, finalFailure.code, finalFailure.message, requiredCapabilities);
 }
 
 export async function snapshotResolvedModelPolicy(

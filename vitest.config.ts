@@ -57,6 +57,10 @@ export default defineConfig({
         replacement: fileURLToPath(new URL("./packages/shared/src/index.ts", import.meta.url)),
       },
       {
+        find: "@vimbuspromax3000/task-intel",
+        replacement: fileURLToPath(new URL("./packages/task-intel/src/index.ts", import.meta.url)),
+      },
+      {
         find: "@vimbuspromax3000/test-runner",
         replacement: fileURLToPath(new URL("./packages/test-runner/src/index.ts", import.meta.url)),
       },
