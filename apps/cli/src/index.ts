@@ -1,5 +1,16 @@
 import { getDashboardSnapshot } from "./dashboard";
 import { isExecutionCommand, runExecutionCommand } from "./execution";
+import {
+  LIVE_VIEW_PANES,
+  applyLiveViewEvents,
+  createLiveViewState,
+  frameToLoopEvent,
+  parseSseFrames,
+  renderControlPane,
+  renderEpicsPane,
+  renderEvaluatorPane,
+  type LiveViewState,
+} from "./live";
 import { isMcpCommand, runMcpCommand } from "./mcp";
 import { isModelsCommand, runModelsCommand } from "./models";
 import { isPlannerCommand, runPlannerCommand } from "./planner";
@@ -12,6 +23,17 @@ const isMcpMode = args.some(isMcpCommand);
 const isModelsMode = args.some(isModelsCommand);
 const isPlannerMode = args.some(isPlannerCommand);
 const isExecutionMode = args.some(isExecutionCommand);
+const projectIdArg = readArgValue(args, "--project-id");
+const apiUrlArg = readArgValue(args, "--api-url") ?? process.env.VIMBUS_API_URL ?? "http://localhost:3000";
+
+function readArgValue(input: readonly string[], flag: string): string | undefined {
+  for (let i = 0; i < input.length; i += 1) {
+    const token = input[i];
+    if (token === flag) return input[i + 1];
+    if (token?.startsWith(`${flag}=`)) return token.slice(flag.length + 1);
+  }
+  return undefined;
+}
 
 if (isSetupMode) {
   try {
@@ -68,12 +90,29 @@ if (isSmokeMode) {
   process.exit(0);
 }
 
+// VIM-36 Sprint 2: 3-pane live TUI subscribed to GET /events?stream=sse.
+// Each pane has a dedicated `Text` node we mutate in place when new SSE
+// frames arrive, so individual events do not cause a full re-render of the
+// screen tree. The reducer + parser live in `./live.ts` so the snapshot test
+// can exercise the same code path against a fixture event tape.
 const { Box, Text, createCliRenderer } = await import("@opentui/core");
 
 const renderer = await createCliRenderer({
   exitOnCtrlC: true,
   targetFps: 30,
 });
+
+// `Text(...)` returns a proxied vnode whose `.content` getter is typed as
+// `StyledText`, but the underlying setter also accepts plain `string`. We
+// route writes through `setContent` to keep the rest of the file free of
+// `as any` casts.
+const epicsText = Text({ content: "No epics yet." });
+const controlText = Text({ content: "Idle." });
+const evaluatorText = Text({ content: "No evaluator activity." });
+
+function setContent(node: { content: unknown }, value: string): void {
+  (node as { content: string }).content = value;
+}
 
 renderer.root.add(
   Box(
@@ -103,8 +142,8 @@ renderer.root.add(
           padding: 1,
           borderStyle: "single",
         },
-        Text({ content: "Epics / Tasks", fg: "#8AD4FF" }),
-        Text({ content: "No tasks loaded." }),
+        Text({ content: LIVE_VIEW_PANES[0], fg: "#8AD4FF" }),
+        epicsText,
       ),
       Box(
         {
@@ -113,8 +152,8 @@ renderer.root.add(
           padding: 1,
           borderStyle: "single",
         },
-        Text({ content: "Control Panel", fg: "#A8E6A3" }),
-        Text({ content: "Bootstrap placeholder." }),
+        Text({ content: LIVE_VIEW_PANES[1], fg: "#A8E6A3" }),
+        controlText,
       ),
       Box(
         {
@@ -123,9 +162,59 @@ renderer.root.add(
           padding: 1,
           borderStyle: "single",
         },
-        Text({ content: "Eval / Tools / Logs", fg: "#F5C982" }),
-        Text({ content: "Waiting for API events." }),
+        Text({ content: LIVE_VIEW_PANES[2], fg: "#F5C982" }),
+        evaluatorText,
       ),
     ),
   ),
 );
+
+if (projectIdArg) {
+  void runLiveSubscription(projectIdArg, apiUrlArg);
+} else {
+  setContent(controlText, "Pass --project-id <id> to subscribe to /events?stream=sse.");
+}
+
+async function runLiveSubscription(projectId: string, apiUrl: string): Promise<void> {
+  let state: LiveViewState = createLiveViewState();
+  const updatePanes = (next: LiveViewState) => {
+    state = next;
+    // Strip the header line — the OpenTUI Box already labels each pane.
+    setContent(epicsText, stripHeader(renderEpicsPane(state), LIVE_VIEW_PANES[0]));
+    setContent(controlText, stripHeader(renderControlPane(state), LIVE_VIEW_PANES[1]));
+    setContent(evaluatorText, stripHeader(renderEvaluatorPane(state), LIVE_VIEW_PANES[2]));
+  };
+
+  try {
+    const url = `${apiUrl.replace(/\/$/, "")}/events?projectId=${encodeURIComponent(projectId)}&stream=sse`;
+    const response = await fetch(url, { headers: { accept: "text/event-stream" } });
+    if (!response.ok || !response.body) {
+      setContent(controlText, `SSE connect failed: HTTP ${response.status}`);
+      return;
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const { frames, remainder } = parseSseFrames(buffer);
+      buffer = remainder;
+      const incoming = frames
+        .map(frameToLoopEvent)
+        .filter((event): event is NonNullable<ReturnType<typeof frameToLoopEvent>> => event !== undefined);
+      if (incoming.length > 0) {
+        updatePanes(applyLiveViewEvents(state, incoming));
+      }
+    }
+  } catch (error) {
+    setContent(controlText, `SSE error: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function stripHeader(rendered: string, header: string): string {
+  if (rendered.startsWith(`${header}\n`)) return rendered.slice(header.length + 1);
+  if (rendered === header) return "";
+  return rendered;
+}

@@ -1,4 +1,5 @@
 import type { LoopEventType } from "@vimbuspromax3000/shared";
+import { getDefaultLoopEventBus } from "../eventBus";
 import type { DatabaseClient } from "./types";
 
 export type AppendLoopEventInput = {
@@ -24,7 +25,14 @@ export async function appendLoopEvent(db: DatabaseClient, input: AppendLoopEvent
     },
   });
 
-  return parseLoopEvent(event);
+  const parsed = parseLoopEvent(event);
+
+  // VIM-36 Sprint 2: publish synchronously to the in-process event bus so the
+  // SSE stream pushes new events without the 100ms poll tail. The bus shrugs
+  // off subscriber errors internally, so a bad listener can't break inserts.
+  getDefaultLoopEventBus().publish(parsed);
+
+  return parsed;
 }
 
 export async function listLoopEvents(db: DatabaseClient, input: ListLoopEventsInput) {
