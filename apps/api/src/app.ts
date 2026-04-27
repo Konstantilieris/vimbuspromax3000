@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import { createExecutionService, type ExecutionService } from "@vimbuspromax3000/agent";
 import {
   compareRegressionBaseline,
@@ -123,6 +124,20 @@ export const healthResponse = {
   runtime: "bun",
 } as const;
 
+export type EventsSseConfig = {
+  /**
+   * Heartbeat interval in milliseconds. The default keeps idle proxies and
+   * load balancers happy without spamming the wire.
+   */
+  heartbeatMs?: number;
+  /**
+   * Polling interval used by the Sprint 1 push fallback. Sprint 2 will swap
+   * the polling source for an in-process / Postgres LISTEN-NOTIFY event bus
+   * so we can drop this knob and guarantee sub-200ms delivery.
+   */
+  pollIntervalMs?: number;
+};
+
 export type ApiAppOptions = {
   prisma?: PrismaClient;
   env?: Record<string, string | undefined>;
@@ -130,7 +145,11 @@ export type ApiAppOptions = {
   executionService?: ExecutionService;
   testRunnerService?: TestRunnerService;
   evaluatorService?: EvaluatorService;
+  eventsSseConfig?: EventsSseConfig;
 };
+
+const DEFAULT_EVENTS_HEARTBEAT_MS = 15_000;
+const DEFAULT_EVENTS_POLL_INTERVAL_MS = 100;
 
 export function createApp(options: ApiAppOptions = {}) {
   const app = new Hono();
@@ -141,6 +160,8 @@ export function createApp(options: ApiAppOptions = {}) {
   const testRunnerService = options.testRunnerService ?? createTestRunnerService({ prisma });
   const mcpService = createMcpService({ prisma });
   const evaluatorService = options.evaluatorService ?? createEvaluatorService({ prisma, env });
+  const eventsHeartbeatMs = options.eventsSseConfig?.heartbeatMs ?? DEFAULT_EVENTS_HEARTBEAT_MS;
+  const eventsPollIntervalMs = options.eventsSseConfig?.pollIntervalMs ?? DEFAULT_EVENTS_POLL_INTERVAL_MS;
 
   app.onError((error, context) =>
     context.json(
@@ -750,6 +771,79 @@ export function createApp(options: ApiAppOptions = {}) {
   });
 
   app.get("/events", async (context) => {
+    const projectId = requireProjectId(context.req.query("projectId"));
+    const taskExecutionId = context.req.query("taskExecutionId");
+    const streamMode = context.req.query("stream");
+
+    if (streamMode === "sse") {
+      // VIM-36 Sprint 1: SSE live stream. Sprint 2 swaps the polling source
+      // out for an in-process / Postgres LISTEN-NOTIFY bus to guarantee the
+      // sub-200ms delivery target without the 100ms tail from the poller.
+      return streamSSE(context, async (sse) => {
+        const seenEventIds = new Set<string>();
+
+        // Replay backlog so reconnecting clients don't lose context. The
+        // event-system contract (docs/architecture/event-system.md) treats
+        // the database as the recovery source after reconnect.
+        const backlog = await listLoopEvents(prisma, {
+          projectId,
+          taskExecutionId,
+          limit: 200,
+        });
+        for (const event of backlog) {
+          seenEventIds.add(event.id);
+          await sse.writeSSE({
+            event: event.type,
+            id: event.id,
+            data: JSON.stringify(event),
+          });
+        }
+
+        let lastHeartbeatAt = Date.now();
+        const aborted = () => sse.aborted || sse.closed;
+
+        while (!aborted()) {
+          const events = await listLoopEvents(prisma, {
+            projectId,
+            taskExecutionId,
+            limit: 200,
+          });
+          for (const event of events) {
+            if (seenEventIds.has(event.id)) continue;
+            seenEventIds.add(event.id);
+            await sse.writeSSE({
+              event: event.type,
+              id: event.id,
+              data: JSON.stringify(event),
+            });
+          }
+
+          if (Date.now() - lastHeartbeatAt >= eventsHeartbeatMs) {
+            // SSE comment frame: clients ignore it, but it keeps proxies and
+            // load balancers from idling the connection out.
+            await sse.write(": heartbeat\n\n");
+            lastHeartbeatAt = Date.now();
+          }
+
+          await sse.sleep(eventsPollIntervalMs);
+        }
+      });
+    }
+
+    // @deprecated since VIM-36 Sprint 1 — prefer GET /events/history for the
+    // JSON list response. This bare /events JSON path is kept for backwards
+    // compatibility with existing CLI callers and will be removed once they
+    // migrate.
+    return context.json(
+      await listLoopEvents(prisma, {
+        projectId,
+        taskExecutionId,
+        limit: optionalNumber(context.req.query("limit")),
+      }),
+    );
+  });
+
+  app.get("/events/history", async (context) => {
     return context.json(
       await listLoopEvents(prisma, {
         projectId: requireProjectId(context.req.query("projectId")),
