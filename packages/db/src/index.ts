@@ -11,4 +11,5 @@ export function getDatabaseUrl(env: Record<string, string | undefined> = process
 }
 
 export * from "./client";
+export * from "./eventBus";
 export * from "./repositories/index";
