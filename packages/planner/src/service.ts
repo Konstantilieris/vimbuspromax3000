@@ -14,6 +14,8 @@ import {
   type VerificationRunner,
 } from "@vimbuspromax3000/shared";
 import { generateObject, jsonSchema, type JSONSchema7 } from "ai";
+import { runOrchestrator } from "./agents/orchestrator";
+import type { PlannerSlotResolver } from "./agents/types";
 import { getDefaultSlotForAgentRole } from "./slots";
 
 export const DEFAULT_PLANNER_GENERATION_SEED = 7;
@@ -108,6 +110,10 @@ export function createPlannerService(options: PlannerServiceOptions): PlannerSer
         throw new Error(`Planner run ${input.plannerRunId} was not found.`);
       }
 
+      // Sprint 2 routes every agent through the same epic-planner slot. Per-
+      // agent slot routing is Sprint 3 scope (see docs/planner/agent-roles.md
+      // for the target slot map). Resolution is performed once and cached so
+      // we keep the existing single-resolution behaviour.
       const slotKey = getDefaultSlotForAgentRole("epic_planner");
       const resolution = await resolveModelSlot(
         prisma,
@@ -124,18 +130,23 @@ export function createPlannerService(options: PlannerServiceOptions): PlannerSer
       }
 
       const model = await loadPlannerModel(prisma, resolution.value, env);
-      const result = await generator({
+      const concreteModelName = resolution.value.concreteModelName;
+
+      const slotResolver: PlannerSlotResolver = async () => ({
+        slotKey,
         model,
-        system: buildPlannerSystemPrompt(),
-        prompt: buildPlannerPrompt(plannerRun),
-        seed: input.seed ?? DEFAULT_PLANNER_GENERATION_SEED,
+        concreteModelName,
       });
 
-      const proposal = normalizeGeneratedPlannerProposal(plannerRun.id, result.object, {
-        summaryFallback: `Plan for ${plannerRun.goal}`,
-      });
+      const orchestratorResult = await runOrchestrator(
+        { generator, slotResolver },
+        {
+          plannerRun,
+          seed: input.seed ?? DEFAULT_PLANNER_GENERATION_SEED,
+        },
+      );
 
-      await persistPlannerProposal(prisma, proposal);
+      await persistPlannerProposal(prisma, orchestratorResult.proposal);
 
       const generatedPlannerRun = await getPlannerRunDetail(prisma, plannerRun.id);
 
@@ -145,10 +156,10 @@ export function createPlannerService(options: PlannerServiceOptions): PlannerSer
 
       return {
         plannerRun: generatedPlannerRun,
-        proposal,
+        proposal: orchestratorResult.proposal,
         slotKey,
-        concreteModelName: resolution.value.concreteModelName,
-        reasoning: result.reasoning,
+        concreteModelName,
+        reasoning: orchestratorResult.reasoning,
       };
     },
   };
@@ -377,62 +388,11 @@ export {
   isVerificationItemRunnableNow,
 } from "@vimbuspromax3000/shared";
 
-function buildPlannerSystemPrompt() {
-  return [
-    "You are TaskGoblin's planner service.",
-    "Produce a software delivery proposal that can be persisted directly into SQLite planning records.",
-    "Keep the output grounded in the operator goal and interview JSON.",
-    "Every epic must include one or more tasks.",
-    "Every task must include acceptance criteria and at least one verification item.",
-    "Keep tasks narrowly scoped, ordered, and implementation-oriented.",
-    "Do not include execution, branching, or patch-review tasks yet.",
-    "Prefer repo-native verification commands such as bun run test:vitest and bun run typecheck when they fit.",
-    "The current POST /executions/:id/test-runs slice executes only approved verification items with a non-empty shell command.",
-    "Kind alone never makes a verification item runnable in this slice.",
-    "Treat Playwright CLI as a normal shell command when needed; do not assume browser MCP or tool-session execution.",
-    "If a visual or evidence check cannot be expressed as a shell command, it is not runnable by the current execution slice.",
-    "Per-kind field guidance:",
-    "- logic: set command (e.g. bun run test:vitest) and testFilePath pointing to the test file.",
-    "- integration: set command (e.g. bunx vitest run src/app.test.ts) and route for the API or module under test.",
-    "- typecheck: set command to bun run typecheck; no other required fields.",
-    "- lint: set command to bun run lint or equivalent; no other required fields.",
-    "- a11y: set command to a Playwright CLI command; set route and interaction describing the flow.",
-    "- visual: omit command if a shell equivalent does not exist; set route, interaction, and expectedAssetId as deferred metadata for operator review.",
-    "- evidence: omit command; set description to clearly state what the operator must inspect and where to find it.",
-  ].join("\n");
-}
-
-function buildPlannerPrompt(plannerRun: PlannerRunDetail) {
-  const lines = [
-    `Project: ${plannerRun.project.name}`,
-    `Root Path: ${plannerRun.project.rootPath}`,
-    `Base Branch: ${plannerRun.project.baseBranch}`,
-    `Branch Naming: ${plannerRun.project.branchNaming}`,
-    `Goal: ${plannerRun.goal}`,
-  ];
-
-  if (plannerRun.moduleName) {
-    lines.push(`Module: ${plannerRun.moduleName}`);
-  }
-
-  if (plannerRun.contextPath) {
-    lines.push(`Context Path: ${plannerRun.contextPath}`);
-  }
-
-  lines.push("Interview JSON:");
-  lines.push(JSON.stringify(plannerRun.interview ?? {}, null, 2));
-  lines.push("Output guidance:");
-  lines.push("- Use concise epic and task titles.");
-  lines.push("- Keep acceptance and risks specific.");
-  lines.push("- Use arrays of strings for acceptance, risks, targetFiles, and requires.");
-  lines.push("- Prefer command-backed verification items that can run through POST /executions/:id/test-runs.");
-  lines.push("- A verification item is runnable NOW only when it has a non-empty command field.");
-  lines.push("- Treat Playwright CLI as a normal shell command only; do not assume MCP-backed browser execution.");
-  lines.push("- visual and evidence items without a shell command are valid deferred metadata but will NOT run.");
-  lines.push("- logic: fill testFilePath. integration: fill route. a11y: fill route and interaction. visual: fill route, interaction, expectedAssetId.");
-
-  return lines.join("\n");
-}
+// Planner system + user prompts now live in the per-agent files under
+// `packages/planner/src/agents/`. Sprint 2 keeps the monolithic prompt content
+// inside `epicPlanner.ts` as a fallback while downstream agents are stubs;
+// Sprint 3 will replace those stubs with the real per-role prompts from
+// docs/planner/agent-roles.md.
 
 function normalizeVerificationItem(
   value: unknown,
