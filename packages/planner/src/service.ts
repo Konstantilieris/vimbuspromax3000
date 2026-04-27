@@ -16,8 +16,8 @@ import {
 import { scoreTaskComplexity } from "@vimbuspromax3000/task-intel";
 import { generateObject, jsonSchema, type JSONSchema7 } from "ai";
 import { runOrchestrator } from "./agents/orchestrator";
-import type { PlannerSlotResolver } from "./agents/types";
-import { getDefaultSlotForAgentRole } from "./slots";
+import type { PlannerAgentRole, PlannerSlotResolver } from "./agents/types";
+import { getDefaultSlotForAgentRole, type PlannerAgentRole as PlannerSlotRole } from "./slots";
 
 export const DEFAULT_PLANNER_GENERATION_SEED = 7;
 
@@ -111,33 +111,72 @@ export function createPlannerService(options: PlannerServiceOptions): PlannerSer
         throw new Error(`Planner run ${input.plannerRunId} was not found.`);
       }
 
-      // Sprint 2 routes every agent through the same epic-planner slot. Per-
-      // agent slot routing is Sprint 3 scope (see docs/planner/agent-roles.md
-      // for the target slot map). Resolution is performed once and cached so
-      // we keep the existing single-resolution behaviour.
-      const slotKey = getDefaultSlotForAgentRole("epic_planner");
-      const resolution = await resolveModelSlot(
+      // VIM-33 + VIM-35 follow-up: each agent resolves its own slot through
+      // `resolveModelSlot` keyed on its role. The role->slot mapping lives in
+      // `getDefaultSlotForAgentRole` (sourced from
+      // `DEFAULT_AGENT_ROLE_MODEL_SLOTS` in @vimbuspromax3000/shared). We still
+      // resolve `epic_planner` eagerly so the service can return its slotKey
+      // and concreteModelName fields (which historically described the lead
+      // planner agent's model).
+      const leadSlotKey = getDefaultSlotForAgentRole("epic_planner");
+      const leadResolution = await resolveModelSlot(
         prisma,
         {
           projectId: plannerRun.projectId,
-          slotKey,
+          slotKey: leadSlotKey,
           requiredCapabilities: ["json"],
         },
         env,
       );
 
-      if (!resolution.ok) {
-        throw new Error(`Planner model resolution failed for ${slotKey}: ${resolution.message}`);
+      if (!leadResolution.ok) {
+        throw new Error(
+          `Planner model resolution failed for ${leadSlotKey}: ${leadResolution.message}`,
+        );
       }
 
-      const model = await loadPlannerModel(prisma, resolution.value, env);
-      const concreteModelName = resolution.value.concreteModelName;
+      const concreteModelName = leadResolution.value.concreteModelName;
+      const leadModel = await loadPlannerModel(prisma, leadResolution.value, env);
+      const leadCache = new Map<ModelSlotKey, { model: unknown; concreteModelName: string }>([
+        [leadSlotKey, { model: leadModel, concreteModelName }],
+      ]);
 
-      const slotResolver: PlannerSlotResolver = async () => ({
-        slotKey,
-        model,
-        concreteModelName,
-      });
+      const slotResolver: PlannerSlotResolver = async (role: PlannerAgentRole) => {
+        const roleSlotKey = resolvePlannerSlotForRole(role);
+        const cached = leadCache.get(roleSlotKey);
+        if (cached) {
+          return {
+            slotKey: roleSlotKey,
+            model: cached.model,
+            concreteModelName: cached.concreteModelName,
+          };
+        }
+
+        const resolution = await resolveModelSlot(
+          prisma,
+          {
+            projectId: plannerRun.projectId,
+            slotKey: roleSlotKey,
+            requiredCapabilities: ["json"],
+          },
+          env,
+        );
+
+        if (!resolution.ok) {
+          throw new Error(
+            `Planner model resolution failed for role=${role} slot=${roleSlotKey}: ${resolution.message}`,
+          );
+        }
+
+        const model = await loadPlannerModel(prisma, resolution.value, env);
+        const entry = { model, concreteModelName: resolution.value.concreteModelName };
+        leadCache.set(roleSlotKey, entry);
+        return {
+          slotKey: roleSlotKey,
+          model,
+          concreteModelName: entry.concreteModelName,
+        };
+      };
 
       const orchestratorResult = await runOrchestrator(
         { generator, slotResolver },
@@ -163,7 +202,7 @@ export function createPlannerService(options: PlannerServiceOptions): PlannerSer
       return {
         plannerRun: generatedPlannerRun,
         proposal: annotatedProposal,
-        slotKey,
+        slotKey: leadSlotKey,
         concreteModelName,
         reasoning: orchestratorResult.reasoning,
       };
@@ -349,6 +388,23 @@ function normalizePlannerProposal(
       };
     }),
   };
+}
+
+/**
+ * Map an orchestrator-level `PlannerAgentRole` to the slot key the policy
+ * engine should resolve for that role. Falls back to `epic_planner`'s slot
+ * for any role we have not enumerated yet so the resolver never throws on an
+ * unknown role from a future agent addition.
+ */
+function resolvePlannerSlotForRole(role: PlannerAgentRole): ModelSlotKey {
+  const knownRoles: Record<PlannerAgentRole, PlannerSlotRole> = {
+    epic_planner: "epic_planner",
+    task_writer: "task_writer",
+    verification_designer: "verification_designer",
+    reviewer: "reviewer",
+  };
+  const slotRole = knownRoles[role];
+  return getDefaultSlotForAgentRole(slotRole);
 }
 
 async function defaultPlannerGenerator(input: {

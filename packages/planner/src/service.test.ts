@@ -117,6 +117,131 @@ describe("createPlannerService.generateAndPersist", () => {
     removeTempDir(tempDir);
   });
 
+  test("resolves a per-role slot for each planner agent (epic_planner, task_writer, verification_designer)", async () => {
+    const env = { VIMBUS_TEST_KEY: "present" };
+    const project = await createProject(prisma, {
+      name: "Planner Per-Role Project",
+      rootPath: tempDir,
+    });
+
+    // Register two distinct slots so the resolver-per-role behaviour is
+    // observable: epic_planner and task_writer both map to planner_deep
+    // (cache hit on the second call), but verification_designer maps to its
+    // own dedicated slot.
+    await setupModelRegistry(prisma, {
+      projectId: project.id,
+      providerKey: "openai",
+      providerKind: "openai",
+      providerStatus: "active",
+      secretEnv: "VIMBUS_TEST_KEY",
+      modelName: "GPT Planner",
+      modelSlug: "gpt-planner",
+      capabilities: ["json"],
+      slotKeys: ["planner_deep"],
+    });
+    await setupModelRegistry(prisma, {
+      projectId: project.id,
+      providerKey: "openai",
+      providerKind: "openai",
+      providerStatus: "active",
+      secretEnv: "VIMBUS_TEST_KEY",
+      modelName: "GPT Verification",
+      modelSlug: "gpt-verification",
+      capabilities: ["json"],
+      slotKeys: ["verification_designer"],
+    });
+
+    const plannerRun = await createPlannerRun(prisma, {
+      projectId: project.id,
+      goal: "Per-role slot resolution sanity",
+      moduleName: "api",
+    });
+
+    let generatorCallCount = 0;
+    const generator = vi.fn(async () => {
+      generatorCallCount += 1;
+      if (generatorCallCount < 3) {
+        return {
+          object: {
+            summary: "stage",
+            epics: [
+              {
+                key: "epic-1",
+                title: "Epic",
+                goal: "goal",
+                acceptance: ["ok"],
+                tasks: [
+                  {
+                    stableId: "task-1",
+                    title: "Task",
+                    type: "backend",
+                    complexity: "medium",
+                    acceptance: ["ok"],
+                    verificationPlan: { items: [] },
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      }
+      return {
+        object: {
+          summary: "Per-role test",
+          epics: [
+            {
+              key: "epic-1",
+              title: "Epic",
+              goal: "goal",
+              acceptance: ["ok"],
+              tasks: [
+                {
+                  stableId: "task-1",
+                  title: "Task",
+                  type: "backend",
+                  complexity: "medium",
+                  acceptance: ["ok"],
+                  verificationPlan: {
+                    items: [
+                      {
+                        kind: "logic",
+                        title: "v",
+                        description: "v",
+                        command: "bun run test:vitest",
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      };
+    });
+
+    const service = createPlannerService({ prisma, env, generator });
+    await service.generateAndPersist({ plannerRunId: plannerRun.id });
+
+    // Each agent role triggers `resolveModelSlot` for its own slot key. With
+    // the lead-resolution cache, planner_deep is resolved exactly once
+    // (covering both epic_planner and task_writer), and verification_designer
+    // is resolved exactly once via its own role-specific call.
+    const events = await prisma.loopEvent.findMany({
+      where: { projectId: project.id, type: "model.resolution.requested" },
+      orderBy: { createdAt: "asc" },
+    });
+
+    const requestedSlotKeys = events.map((event) => {
+      return JSON.parse(event.payloadJson).requestedSlotKey as string;
+    });
+
+    expect(requestedSlotKeys).toContain("planner_deep");
+    expect(requestedSlotKeys).toContain("verification_designer");
+    // Two distinct slot keys -> exactly two resolution events (cache prevents
+    // duplicate planner_deep resolution between epic_planner + task_writer).
+    expect(events).toHaveLength(2);
+  }, 30000);
+
   test("persists a complexity label on each generated task derived from the task-intel scorer", async () => {
     const env = { VIMBUS_TEST_KEY: "present" };
     const project = await createProject(prisma, {
@@ -134,6 +259,20 @@ describe("createPlannerService.generateAndPersist", () => {
       modelSlug: "gpt-planner",
       capabilities: ["json"],
       slotKeys: ["planner_deep"],
+    });
+    // VIM-33 follow-up: each agent now resolves its own slot. Seed the
+    // verification_designer slot so the verification designer agent's
+    // role-specific resolution call succeeds.
+    await setupModelRegistry(prisma, {
+      projectId: project.id,
+      providerKey: "openai",
+      providerKind: "openai",
+      providerStatus: "active",
+      secretEnv: "VIMBUS_TEST_KEY",
+      modelName: "GPT Verification",
+      modelSlug: "gpt-verification",
+      capabilities: ["json"],
+      slotKeys: ["verification_designer"],
     });
 
     const plannerRun = await createPlannerRun(prisma, {
