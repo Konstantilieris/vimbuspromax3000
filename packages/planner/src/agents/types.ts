@@ -6,6 +6,9 @@ import type { PlannerGenerator, PlannerRunDetail } from "../service";
  * Shape produced by the underlying generator before normalization. Mirrors the
  * monolithic `GeneratedPlannerProposal` shape in `service.ts` but kept local so
  * agents can pass it between stages without leaking the full normalized type.
+ *
+ * This is the "rich" shape -- the final shape after the verification designer
+ * has filled in `verificationPlan.items` for every task.
  */
 export type GeneratedPlannerProposal = {
   summary?: string;
@@ -48,11 +51,32 @@ export type GeneratedPlannerProposal = {
 };
 
 /**
- * Resolves a model slot for a given agent role. Sprint 2 does NOT yet route
- * agents to per-role slots (that is Sprint 3 scope) -- the orchestrator only
- * resolves the epic-planner slot today and uses it for the single underlying
- * generator call. The interface lives here so per-agent slot routing can be
- * wired without changing agent signatures next sprint.
+ * Skeleton epic shape produced by the epic planner. The epic planner now owns
+ * ONLY epic-level metadata (title, goal, acceptance, risks). Tasks are filled
+ * in by the task writer, verification items by the verification designer.
+ */
+export type EpicSkeleton = {
+  key?: string;
+  title?: string;
+  goal?: string;
+  orderIndex?: number;
+  acceptance?: unknown;
+  risks?: unknown;
+};
+
+/**
+ * Task shape produced by the task writer. Tasks at this stage may not yet have
+ * a verification plan -- that is the verification designer's job.
+ */
+export type TaskSkeleton = NonNullable<
+  GeneratedPlannerProposal["epics"][number]["tasks"][number]
+>;
+
+/**
+ * Resolves a model slot for a given agent role. Each agent calls this with its
+ * own role identity so per-agent slot routing flows through the existing
+ * `resolveModelSlot` helper. The orchestrator does NOT cache results, so the
+ * resolver is invoked once per agent stage.
  */
 export type PlannerSlotResolver = (
   role: PlannerAgentRole,
@@ -80,13 +104,25 @@ export type AgentInput = {
 };
 
 export type EpicPlannerOutput = {
-  generated: GeneratedPlannerProposal;
+  summary?: string;
+  epics: EpicSkeleton[];
   reasoning?: string;
 };
 
-export type TaskWriterOutput = EpicPlannerOutput;
+export type TaskWriterOutput = {
+  summary?: string;
+  /**
+   * Epics enriched with tasks. Verification plans may still be empty -- the
+   * verification designer fills those in.
+   */
+  epics: Array<EpicSkeleton & { tasks: TaskSkeleton[] }>;
+  reasoning?: string;
+};
 
-export type VerificationDesignerOutput = EpicPlannerOutput;
+export type VerificationDesignerOutput = {
+  generated: GeneratedPlannerProposal;
+  reasoning?: string;
+};
 
 export type ReviewerVerdict =
   | { ok: true; output: VerificationDesignerOutput }

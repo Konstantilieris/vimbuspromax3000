@@ -2,6 +2,7 @@ import type {
   AgentInput,
   PlannerAgentDeps,
   ReviewerVerdict,
+  TaskWriterOutput,
   VerificationDesignerOutput,
 } from "./types";
 import { runVerificationDesigner } from "./verificationDesigner";
@@ -16,17 +17,23 @@ export type ReviewerOptions = {
   /**
    * Override for the reviewer's "re-route to verification designer" callback.
    * Defaults to invoking `runVerificationDesigner` with the orchestrator's
-   * deps + input so production wiring stays one line. Tests inject a custom
-   * redo to exercise the bounded-retry failure path without depending on the
-   * Sprint 2 designer's deterministic fallback.
+   * deps + input + the original `TaskWriterOutput` (`redoUpstream`). Tests
+   * inject a custom redo to exercise the bounded-retry failure path without
+   * depending on the verification designer's deterministic fallback.
    */
   redo?: ReviewerRedo;
+  /**
+   * Original `TaskWriterOutput` used by the default `redo` to re-run the
+   * verification designer when the gate rejects. Optional so tests that supply
+   * their own `redo` do not need to construct a task-writer skeleton.
+   */
+  redoUpstream?: TaskWriterOutput;
 };
 
 /**
- * Sprint 2 reviewer.
+ * Sprint 2 reviewer (carry-over to VIM-33 Sprint 3).
  *
- * Gate semantics (the only piece of real review logic this sprint):
+ * Gate semantics (the only piece of real review logic this slice):
  *
  *   - A proposal is rejected if any task is missing at least one verification
  *     item.
@@ -34,8 +41,9 @@ export type ReviewerOptions = {
  *   - It will perform up to `REVIEWER_MAX_REROUTES` (= 2) re-routes before
  *     giving up and returning `{ ok: false, ... }`.
  *
- * Sprint 3 will replace this with a proper review prompt that also checks
- * acceptance criteria, branch policy, asset references, and operator gates.
+ * VIM-33 Sprint 3 keeps this gate intact; later slices will replace this with
+ * a proper review prompt that also checks acceptance criteria, branch policy,
+ * asset references, and operator gates.
  */
 export async function runReviewer(
   deps: PlannerAgentDeps,
@@ -44,7 +52,12 @@ export async function runReviewer(
   options: ReviewerOptions = {},
 ): Promise<ReviewerVerdict> {
   const redo: ReviewerRedo =
-    options.redo ?? ((current) => runVerificationDesigner(deps, input, current));
+    options.redo ??
+    (async (current) => {
+      const redoUpstream =
+        options.redoUpstream ?? deriveTaskWriterUpstreamFromVerification(current);
+      return runVerificationDesigner(deps, input, redoUpstream);
+    });
 
   let candidate = upstream;
 
@@ -74,6 +87,24 @@ export async function runReviewer(
   };
 }
 
+/**
+ * Project the failing `VerificationDesignerOutput` back into a `TaskWriterOutput`
+ * so the default redo can re-run the verification designer when the orchestrator
+ * (or a test) did not supply `options.redoUpstream`. We keep tasks but drop
+ * verificationPlan since the designer is about to regenerate it.
+ */
+function deriveTaskWriterUpstreamFromVerification(
+  current: VerificationDesignerOutput,
+): TaskWriterOutput {
+  return {
+    summary: current.generated.summary,
+    epics: current.generated.epics.map((epic) => ({
+      ...epic,
+      tasks: epic.tasks.map(({ verificationPlan: _ignored, ...rest }) => rest),
+    })),
+  };
+}
+
 export function collectTasksMissingVerification(
   output: VerificationDesignerOutput,
 ): string[] {
@@ -90,10 +121,3 @@ export function collectTasksMissingVerification(
 
   return missing;
 }
-
-/* eslint-disable @typescript-eslint/no-unused-vars */
-function buildReviewerPrompt(): string {
-  // TODO(VIM-33 Sprint 3): real reviewer prompt content.
-  return "TODO: reviewer prompt";
-}
-/* eslint-enable @typescript-eslint/no-unused-vars */
