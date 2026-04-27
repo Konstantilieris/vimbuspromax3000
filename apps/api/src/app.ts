@@ -815,7 +815,21 @@ export function createApp(options: ApiAppOptions = {}) {
   });
 
   app.post("/executions/:id/patch/reject", async (context) => {
-    return context.json(await executionService.rejectExecutionPatchReview(context.req.param("id")));
+    const result = await executionService.rejectExecutionPatchReview(context.req.param("id"));
+    // VIM-37 — operator notification: a patch rejection is operator-actionable,
+    // so surface it on the LoopEventBus alongside the existing task.failed
+    // event the execution service emits.
+    await appendLoopEvent(prisma, {
+      projectId: result.execution.task.epic.project.id,
+      taskExecutionId: result.execution.id,
+      type: "operator.notification",
+      payload: {
+        severity: "error",
+        subjectType: "patch_review",
+        subjectId: result.patchReview.id,
+      },
+    });
+    return context.json(result);
   });
 
   // VIM-30: attempt-based retry with same-slot retry, escalation to
@@ -825,6 +839,33 @@ export function createApp(options: ApiAppOptions = {}) {
   app.post("/executions/:id/retry", async (context) => {
     try {
       const result = await executionService.retryExecution(context.req.param("id"));
+      // VIM-37 — operator notification: surface escalation to a stronger
+      // slot (info) and terminal attempt-budget exhaustion (error). A
+      // same-slot retry is routine and does not raise a notification.
+      const projectId = result.execution.task.epic.project.id;
+      if (result.terminated) {
+        await appendLoopEvent(prisma, {
+          projectId,
+          taskExecutionId: result.execution.id,
+          type: "operator.notification",
+          payload: {
+            severity: "error",
+            subjectType: "task_execution",
+            subjectId: result.execution.id,
+          },
+        });
+      } else if (result.decision.state === "escalated") {
+        await appendLoopEvent(prisma, {
+          projectId,
+          taskExecutionId: result.execution.id,
+          type: "operator.notification",
+          payload: {
+            severity: "info",
+            subjectType: "task_execution",
+            subjectId: result.execution.id,
+          },
+        });
+      }
       return context.json(result);
     } catch (error) {
       if (error instanceof RetryExecutionError) {
@@ -1349,6 +1390,22 @@ export function createApp(options: ApiAppOptions = {}) {
 
     try {
       const evalRun = await evaluatorService.runEvaluation(context.req.param("id"));
+      // VIM-37 — operator notification: a `warn` verdict means the operator
+      // should review before proceeding. `proceed` and `fail` are already
+      // covered by the existing event tape (`evaluation.finished` +
+      // `task.failed`), so we only surface the ambiguous middle band here.
+      if (evalRun && evalRun.verdict === "warn") {
+        await appendLoopEvent(prisma, {
+          projectId: execution.task.epic.project.id,
+          taskExecutionId: execution.id,
+          type: "operator.notification",
+          payload: {
+            severity: "warn",
+            subjectType: "eval_run",
+            subjectId: evalRun.id,
+          },
+        });
+      }
       return context.json({ evalRun });
     } catch (err) {
       if (err instanceof EvaluatorError && err.code === "MODEL_SLOT_UNAVAILABLE") {

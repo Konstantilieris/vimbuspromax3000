@@ -568,6 +568,10 @@ export const LOOP_EVENT_TYPES = [
   "patch.approved",
   "task.completed",
   "task.failed",
+  // VIM-37 — operator.notification surfaces evaluator warns, patch rejects,
+  // and retry escalations as a CLI badge. Payload shape:
+  // `{ severity: "info" | "warn" | "error", subjectType: string, subjectId: string }`.
+  "operator.notification",
 ] as const;
 export type LoopEventType = (typeof LOOP_EVENT_TYPES)[number];
 export const isLoopEventType = createEnumGuard(LOOP_EVENT_TYPES);

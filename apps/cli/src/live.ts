@@ -38,6 +38,24 @@ export type EvaluatorEntry = {
   taskExecutionId?: string;
 };
 
+/**
+ * VIM-37 — Operator notification badge.
+ *
+ * Severity drives the rendered tag and (when wired into a colored TUI) the
+ * badge color. The CLI clears all notifications when the operator presses the
+ * `n` keybinding (see {@link handleLiveViewKey}).
+ */
+export type NotificationSeverity = "info" | "warn" | "error";
+
+export type NotificationEntry = {
+  id: string;
+  severity: NotificationSeverity;
+  subjectType: string;
+  subjectId: string;
+  taskExecutionId?: string;
+  createdAt: string;
+};
+
 export type LiveViewState = {
   epics: EpicView[];
   /** Set of seen event ids so re-applying the same event is a no-op. */
@@ -50,6 +68,12 @@ export type LiveViewState = {
     eventCount: number;
   };
   evaluator: EvaluatorEntry[];
+  /**
+   * VIM-37 — operator notifications badge state. Each entry is one
+   * `operator.notification` event; pressing key `n` (or calling
+   * {@link acknowledgeNotifications}) clears the list.
+   */
+  notifications: NotificationEntry[];
 };
 
 export function createLiveViewState(): LiveViewState {
@@ -58,6 +82,7 @@ export function createLiveViewState(): LiveViewState {
     seenEventIds: new Set<string>(),
     control: { eventCount: 0 },
     evaluator: [],
+    notifications: [],
   };
 }
 
@@ -73,6 +98,7 @@ export function applyLiveViewEvents(state: LiveViewState, events: readonly LoopE
     seenEventIds: new Set(state.seenEventIds),
     control: { ...state.control },
     evaluator: [...state.evaluator],
+    notifications: [...state.notifications],
   };
 
   for (const event of events) {
@@ -146,9 +172,45 @@ function routeEvent(state: LiveViewState, event: LoopEvent): void {
       });
       return;
     }
+    case "operator.notification": {
+      // VIM-37 — accumulate notifications until the operator acknowledges
+      // them with the `n` keybinding. Bad payloads are skipped silently so a
+      // malformed event can't crash the live view.
+      const entry = parseNotificationPayload(event);
+      if (entry) {
+        state.notifications.push(entry);
+      }
+      return;
+    }
     default:
       return;
   }
+}
+
+const NOTIFICATION_SEVERITIES: ReadonlySet<NotificationSeverity> = new Set([
+  "info",
+  "warn",
+  "error",
+]);
+
+function parseNotificationPayload(event: LoopEvent): NotificationEntry | undefined {
+  if (!isRecord(event.payload)) return undefined;
+  const severity = event.payload.severity;
+  const subjectType = event.payload.subjectType;
+  const subjectId = event.payload.subjectId;
+  if (typeof severity !== "string" || !NOTIFICATION_SEVERITIES.has(severity as NotificationSeverity)) {
+    return undefined;
+  }
+  if (typeof subjectType !== "string" || subjectType.length === 0) return undefined;
+  if (typeof subjectId !== "string" || subjectId.length === 0) return undefined;
+  return {
+    id: event.id,
+    severity: severity as NotificationSeverity,
+    subjectType,
+    subjectId,
+    taskExecutionId: event.taskExecutionId,
+    createdAt: event.createdAt,
+  };
 }
 
 function pushEvaluator(state: LiveViewState, entry: EvaluatorEntry): void {
@@ -219,7 +281,12 @@ function applyTaskStatus(epics: EpicView[], taskId: string, status: string): Epi
 }
 
 export function getLiveViewSnapshot(state: LiveViewState): string {
-  return [renderEpicsPane(state), renderControlPane(state), renderEvaluatorPane(state)].join("\n\n");
+  return [
+    renderEpicsPane(state),
+    renderControlPane(state),
+    renderEvaluatorPane(state),
+    renderNotificationsPane(state),
+  ].join("\n\n");
 }
 
 export function renderEpicsPane(state: LiveViewState): string {
@@ -269,6 +336,63 @@ export function renderEvaluatorPane(state: LiveViewState): string {
     lines.push(`- ${entry.line}`);
   }
   return lines.join("\n");
+}
+
+/**
+ * VIM-37 — Severity tag rendered in the badge. The TUI wiring (OpenTUI) maps
+ * each tag to a color: `info` (cyan), `warn` (yellow), `error` (red). This
+ * function exposes the canonical color name so a future renderer change has
+ * a single source of truth.
+ */
+export function severityColor(severity: NotificationSeverity): string {
+  switch (severity) {
+    case "info":
+      return "cyan";
+    case "warn":
+      return "yellow";
+    case "error":
+      return "red";
+  }
+}
+
+export function renderNotificationsPane(state: LiveViewState): string {
+  const lines: string[] = ["Notifications"];
+  if (state.notifications.length === 0) {
+    lines.push("No notifications.");
+    return lines.join("\n");
+  }
+  for (const entry of state.notifications) {
+    const tag = `[${entry.severity.toUpperCase()}]`;
+    lines.push(`${tag} ${entry.subjectType} ${entry.subjectId}`);
+  }
+  lines.push("Press 'n' to acknowledge.");
+  return lines.join("\n");
+}
+
+/**
+ * VIM-37 — Clear all pending operator notifications. Returns a new state when
+ * the badge is non-empty so React-style consumers see a referential change;
+ * returns the same state when there is nothing to clear so callers can short
+ * circuit re-renders.
+ */
+export function acknowledgeNotifications(state: LiveViewState): LiveViewState {
+  if (state.notifications.length === 0) return state;
+  return {
+    ...state,
+    notifications: [],
+  };
+}
+
+/**
+ * VIM-37 — Keypress dispatcher for the live view. Pressing `n` acknowledges
+ * the notification badge; any other key returns the same state so the caller
+ * can preserve ===-equality and skip a re-render.
+ */
+export function handleLiveViewKey(state: LiveViewState, key: string): LiveViewState {
+  if (key === "n" || key === "N") {
+    return acknowledgeNotifications(state);
+  }
+  return state;
 }
 
 // ---------------------------------------------------------------------------
