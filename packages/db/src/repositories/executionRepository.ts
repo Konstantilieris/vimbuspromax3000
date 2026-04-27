@@ -246,6 +246,30 @@ export async function createModelDecision(db: DatabaseClient, input: CreateModel
   });
 }
 
+/**
+ * VIM-30 — return the most recent {@link ModelDecision} for an execution,
+ * ordered by attempt descending. Used by the retry runtime to decide whether
+ * a duplicate POST should be a no-op (latest is still `selected`) or advance
+ * the attempt window (latest is `stopped` / `escalated`).
+ */
+export async function getLatestModelDecision(db: DatabaseClient, taskExecutionId: string) {
+  return db.modelDecision.findFirst({
+    where: { taskExecutionId },
+    orderBy: [{ attempt: "desc" }],
+  });
+}
+
+/**
+ * VIM-30 — list every {@link ModelDecision} for an execution, oldest first.
+ * Useful for debugging + replay; not a hot path.
+ */
+export async function listModelDecisionsForExecution(db: DatabaseClient, taskExecutionId: string) {
+  return db.modelDecision.findMany({
+    where: { taskExecutionId },
+    orderBy: [{ attempt: "asc" }],
+  });
+}
+
 function parseJson(value: string | null) {
   if (!value) {
     return null;
