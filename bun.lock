@@ -126,10 +126,15 @@
         "@vimbuspromax3000/db": "workspace:*",
         "@vimbuspromax3000/model-registry": "workspace:*",
         "@vimbuspromax3000/shared": "workspace:*",
+        "@vimbuspromax3000/task-intel": "workspace:*",
       },
     },
     "packages/shared": {
       "name": "@vimbuspromax3000/shared",
+      "version": "0.1.0",
+    },
+    "packages/task-intel": {
+      "name": "@vimbuspromax3000/task-intel",
       "version": "0.1.0",
     },
     "packages/test-runner": {
@@ -441,6 +446,8 @@
     "@vimbuspromax3000/policy-engine": ["@vimbuspromax3000/policy-engine@workspace:packages/policy-engine"],
 
     "@vimbuspromax3000/shared": ["@vimbuspromax3000/shared@workspace:packages/shared"],
+
+    "@vimbuspromax3000/task-intel": ["@vimbuspromax3000/task-intel@workspace:packages/task-intel"],
 
     "@vimbuspromax3000/test-runner": ["@vimbuspromax3000/test-runner@workspace:packages/test-runner"],
 

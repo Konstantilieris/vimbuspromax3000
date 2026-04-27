@@ -9,6 +9,7 @@
   "dependencies": {
     "@vimbuspromax3000/db": "workspace:*",
     "@vimbuspromax3000/model-registry": "workspace:*",
-    "@vimbuspromax3000/shared": "workspace:*"
+    "@vimbuspromax3000/shared": "workspace:*",
+    "@vimbuspromax3000/task-intel": "workspace:*"
   }
 }
