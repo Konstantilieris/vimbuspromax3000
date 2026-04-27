@@ -95,17 +95,26 @@ Clients must treat the database as the recovery source after reconnect — both 
 backlog replay (the first frames after subscription) and `/events/history` read from
 the same `LoopEvent` table.
 
-### Sprint 1 push fallback (followups for Sprint 2)
+### Sprint 2 close — in-process event bus + 3-pane live view
 
-VIM-36 Sprint 1 ships SSE on top of a 100ms repository poll keyed on `LoopEvent.id`.
-That hits the ~200ms delivery target on local dev, but Sprint 2 should:
+VIM-36 Sprint 2 swapped the Sprint 1 100ms poller for an in-process event bus
+implemented in `packages/db/src/eventBus.ts`. `appendLoopEvent` publishes
+synchronously after the row commits, so SSE subscribers see new events with
+sub-millisecond latency (well inside the 200ms delivery acceptance criterion).
 
-- Replace the poller with an in-process event bus that `appendLoopEvent` notifies
-  directly, so writes propagate without the 100ms tail.
-- Add a Postgres `LISTEN/NOTIFY` adapter once the API has a Postgres deployment, so
-  multi-process API instances share one event source.
-- Wire the 3-pane TUI live view (`apps/cli/src/live.ts` or equivalent) to consume
-  `/events?stream=sse` and render the Tasks / Control / Logs split. The CLI is
-  OpenTUI today (see `apps/cli/package.json`), so the live view will use OpenTUI
-  primitives rather than Ink.
-- Add a CLI snapshot test that replays a fixture event tape against the live view.
+- The bus is a project-scoped (and optionally execution-scoped) listener
+  registry exposed via `getDefaultLoopEventBus()`. Tests reset state via
+  `resetDefaultLoopEventBus()`.
+- The SSE handler in `apps/api/src/app.ts` subscribes once on connect, replays
+  the database backlog (deduped against the bus stream), then drains a
+  per-connection queue. A separate heartbeat timer enqueues a comment frame at
+  `eventsSseConfig.heartbeatMs` (default 15s) so idle connections stay open.
+- The 3-pane live view lives in `apps/cli/src/live.ts` and is wired into
+  `apps/cli/src/index.ts`. The reducer (`applyLiveViewEvents`) and SSE frame
+  parser (`parseSseFrames`) are pure so `apps/cli/src/live.test.ts` can
+  snapshot the panes against a fixture event tape; the OpenTUI runtime
+  mutates three pre-allocated `Text` nodes per update, so individual events do
+  not trigger a full re-render of the screen tree.
+- Future work: a Postgres `LISTEN/NOTIFY` adapter can plug in behind the same
+  `LoopEventBus.subscribe` contract once the API has a multi-process
+  deployment.
