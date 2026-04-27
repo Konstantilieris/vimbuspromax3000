@@ -137,6 +137,18 @@ type CandidateValidation =
  */
 export type ModelResolutionRequestWithComplexity = ModelResolutionRequest & {
   complexity?: ComplexityLabel | string | null;
+  /**
+   * Optional 1-based attempt count for the current execution. When provided
+   * and the request resolves to an `executor_*` slot (after complexity
+   * escalation), this triggers VIM-30 attempt-based escalation:
+   *   - attempt 1-2 on `executor_default` stays on `executor_default`
+   *   - attempt 3 on `executor_default` is escalated to `executor_strong`
+   *   - attempt 4+ produces a `max_attempts_exceeded` resolution failure
+   *
+   * If complexity already escalated the slot to `executor_strong`, attempt
+   * escalation is a no-op (the slot is already at its terminal executor).
+   */
+  attempt?: number;
 };
 
 export async function resolveModelSlot(
@@ -149,7 +161,34 @@ export async function resolveModelSlot(
     requestedSlotKey: input.slotKey,
     complexity: input.complexity ?? null,
   });
-  const effectiveSlotKey = complexityDecision.slotKey;
+
+  // Layer VIM-30 attempt escalation on top of the complexity-escalated slot.
+  // Only applies when (a) caller passed an attempt count and (b) the
+  // post-complexity slot is one of the `executor_*` slots the helper knows
+  // how to reason about.
+  let effectiveSlotKey = complexityDecision.slotKey;
+  let attemptEscalated = false;
+  let attemptReason: string | null = null;
+  let attemptDecision: ExecutorAttemptDecision | null = null;
+
+  if (
+    typeof input.attempt === "number" &&
+    (effectiveSlotKey === "executor_default" || effectiveSlotKey === "executor_strong")
+  ) {
+    attemptDecision = selectExecutorSlotForAttempt(input.attempt);
+    if (attemptDecision.kind === "execute") {
+      // Strong slot is the terminal executor — never demote it back to default
+      // even if the attempt mapping says otherwise. Composition rule: take the
+      // strongest of the two decisions.
+      const candidateSlot =
+        effectiveSlotKey === "executor_strong" ? "executor_strong" : attemptDecision.slotKey;
+      attemptEscalated = candidateSlot !== effectiveSlotKey;
+      effectiveSlotKey = candidateSlot;
+      attemptReason = attemptDecision.reason;
+    } else {
+      attemptReason = attemptDecision.reason;
+    }
+  }
 
   await emitModelEvent(prisma, {
     projectId: input.projectId,
@@ -159,8 +198,11 @@ export async function resolveModelSlot(
       slotKey: effectiveSlotKey,
       requestedSlotKey: input.slotKey,
       complexity: input.complexity ?? null,
-      escalated: complexityDecision.escalated,
+      escalated: complexityDecision.escalated || attemptEscalated,
       requiredCapabilities,
+      attempt: input.attempt ?? null,
+      attemptEscalated,
+      attemptReason,
     },
   });
 
@@ -168,6 +210,18 @@ export async function resolveModelSlot(
     ...input,
     slotKey: effectiveSlotKey,
   };
+
+  // VIM-30 terminal failure: attempts past the retry budget never reach the
+  // registry; emit a dedicated failure code so the runtime can short-circuit.
+  if (attemptDecision && attemptDecision.kind === "fail") {
+    return fail(
+      prisma,
+      effectiveInput,
+      "slot_unassigned",
+      `Attempt ${input.attempt} exceeds the retry budget (${attemptDecision.reason}).`,
+      requiredCapabilities,
+    );
+  }
 
   const slot = await resolveSlotBase(prisma, input.projectId, effectiveSlotKey);
 
