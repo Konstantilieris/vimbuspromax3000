@@ -21,5 +21,9 @@
     "@vimbuspromax3000/test-runner": "workspace:*",
     "@vimbuspromax3000/verification": "workspace:*",
     "hono": "4.12.14"
+  },
+  "devDependencies": {
+    "@ai-sdk/provider": "^3.0.8",
+    "ai": "^6.0.168"
   }
 }

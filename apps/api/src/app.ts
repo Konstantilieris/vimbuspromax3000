@@ -1,6 +1,11 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { createExecutionService, type ExecutionService } from "@vimbuspromax3000/agent";
+import {
+  createExecutionService,
+  createVercelAiSdkAgentGeneratorFactory,
+  type CreateAgentGenerator,
+  type ExecutionService,
+} from "@vimbuspromax3000/agent";
 import {
   compareRegressionBaseline,
   scoreBenchmarkRun,
@@ -146,17 +151,49 @@ export type ApiAppOptions = {
   testRunnerService?: TestRunnerService;
   evaluatorService?: EvaluatorService;
   eventsSseConfig?: EventsSseConfig;
+  /**
+   * VIM-29 Sprint 2 — overrides the agent generator factory wired into
+   * `createExecutionService`. Tests inject a fake (or AI SDK
+   * `MockLanguageModelV3`-backed) generator here so the loop runs end-to-end
+   * without hitting a real provider. When absent, production boot defaults
+   * to the Vercel AI SDK adapter resolved from prisma + env.
+   */
+  agentGeneratorFactory?: CreateAgentGenerator | null;
+  /**
+   * VIM-29 Sprint 2 — turn budget for the execution agent loop. Defaults to
+   * {@link DEFAULT_AGENT_LOOP_MAX_TURNS} (mirroring the conservative default
+   * documented in `docs/policy/model-selection.md`; the policy does not yet
+   * pin a hard number so we keep the same 25-turn ceiling as Sprint 1).
+   */
+  agentLoopMaxTurns?: number;
 };
 
 const DEFAULT_EVENTS_HEARTBEAT_MS = 15_000;
 const DEFAULT_EVENTS_POLL_INTERVAL_MS = 100;
+const DEFAULT_AGENT_LOOP_MAX_TURNS = 25;
 
 export function createApp(options: ApiAppOptions = {}) {
   const app = new Hono();
   const prisma = options.prisma ?? createPrismaClient();
   const env = options.env ?? process.env;
   const plannerService = options.plannerService ?? createPlannerService({ prisma, env });
-  const executionService = options.executionService ?? createExecutionService({ prisma, env });
+  const agentLoopMaxTurns = options.agentLoopMaxTurns ?? DEFAULT_AGENT_LOOP_MAX_TURNS;
+  // Sprint 2: caller opts in. Tests + the existing app.test.ts smoke pass
+  // `null` (or simply omit the option) to keep the loop disabled and exercise
+  // only the branch/model/approval gates. The production boot file
+  // (`apps/api/src/index.ts`) explicitly wires
+  // `createVercelAiSdkAgentGeneratorFactory` so the loop runs against a real
+  // provider when starting the server.
+  const agentGeneratorFactory =
+    options.agentGeneratorFactory === null ? undefined : options.agentGeneratorFactory;
+  const executionService =
+    options.executionService ??
+    createExecutionService({
+      prisma,
+      env,
+      agentGeneratorFactory,
+      agentLoopMaxTurns,
+    });
   const testRunnerService = options.testRunnerService ?? createTestRunnerService({ prisma });
   const mcpService = createMcpService({ prisma });
   const evaluatorService = options.evaluatorService ?? createEvaluatorService({ prisma, env });
