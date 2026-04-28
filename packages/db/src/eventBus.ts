@@ -88,7 +88,54 @@ export function getDefaultLoopEventBus(): LoopEventBus {
 /**
  * Reset the process-wide singleton. Test-only — production code never calls
  * this. Exported so vitest suites can isolate subscription state per test.
+ *
+ * Optional override accepts a pre-built bus so tests of the Postgres adapter
+ * (or any future transport) can install their own instance without touching
+ * this module's internals.
  */
-export function resetDefaultLoopEventBus(): void {
-  defaultBus = createLoopEventBus();
+export function resetDefaultLoopEventBus(override?: LoopEventBus): void {
+  defaultBus = override ?? createLoopEventBus();
+}
+
+/**
+ * VIM-45 — Bus selection helper. Reads `VIMBUS_LOOP_BUS` and returns either
+ * the in-process bus (default) or the Postgres LISTEN/NOTIFY adapter. The
+ * Postgres branch is async because we want listener-connect failures to
+ * surface at startup, not at first publish.
+ *
+ * In-process is the default to keep every existing caller unchanged. Today
+ * only API-layer wiring needs to know about this helper; agent / planner
+ * code keeps calling `getDefaultLoopEventBus()`.
+ */
+export type LoopEventBusEnv = {
+  VIMBUS_LOOP_BUS?: string;
+};
+
+export type LoopEventBusFactoryOptions = {
+  env?: LoopEventBusEnv;
+  /**
+   * Postgres adapter wiring. Required when `env.VIMBUS_LOOP_BUS === "postgres"`.
+   * The `connect` shape lives in `./eventBus.postgres` (`PostgresNotifyClient`)
+   * so importing *this* module never pulls a real `pg` dependency at runtime.
+   */
+  postgres?: import("./eventBus.postgres").PostgresLoopEventBusOptions;
+};
+
+export async function buildLoopEventBus(
+  options: LoopEventBusFactoryOptions = {},
+): Promise<LoopEventBus> {
+  const env = options.env ?? (process.env as LoopEventBusEnv);
+  const mode = (env.VIMBUS_LOOP_BUS ?? "memory").toLowerCase();
+  if (mode === "postgres" || mode === "pg") {
+    if (!options.postgres) {
+      throw new Error(
+        "VIM-45: VIMBUS_LOOP_BUS=postgres requires options.postgres (a pg.Client factory).",
+      );
+    }
+    // Lazy import keeps the in-process branch free of any postgres module
+    // load cost.
+    const { createPostgresLoopEventBus } = await import("./eventBus.postgres");
+    return createPostgresLoopEventBus(options.postgres);
+  }
+  return createLoopEventBus();
 }

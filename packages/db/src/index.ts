@@ -12,4 +12,12 @@ export function getDatabaseUrl(env: Record<string, string | undefined> = process
 
 export * from "./client";
 export * from "./eventBus";
+export {
+  POSTGRES_LOOP_CHANNEL,
+  POSTGRES_NOTIFY_PAYLOAD_LIMIT,
+  createPostgresLoopEventBus,
+  type PostgresLoopEventBus,
+  type PostgresLoopEventBusOptions,
+  type PostgresNotifyClient,
+} from "./eventBus.postgres";
 export * from "./repositories/index";
