@@ -1,163 +1,199 @@
-# Next Session — Verify and Ship Locally Drafted Sprint 6 Work
+# Next Session — Start Sprint 7 (M2 Release Candidate, kickoff)
 
-_Drafted 2026-04-28. Paste this into a fresh Claude Code session to continue Sprint 6._
+_Drafted 2026-04-28 after Sprint 6 close-out. Supersedes the prior Sprint 6 verify-and-ship version of this file (preserved in git history at commits `0cee2c3` and `5317bda`)._
 
 ---
 
 ## TL;DR
 
-Sprint 6 was drafted in a single working tree (no worktree agents) and is now sitting locally as 8 commits on `main`, **8 commits ahead of `origin/main`**, **none verified by typecheck/tests**, **none reflected in Jira yet**. Your job this session is to validate, push, and close the loop in Jira — not to start new feature work.
+Sprint 6 is verified, shipped, and closed in Jira. Sprint 7 = **M2 Release Candidate & Dogfood** (epic VIM-47). The slate is filed, the plan is locked, the test-matrix story (VIM-48) blocks everything else this sprint. Your job this session: push the 2 outstanding local commits, do pre-flight, then start VIM-48.
 
-The sequence below is "verify → file → ship → close out", not "spawn parallel agents and merge". The `docs/SPRINT-6-PROMPT.md` playbook (parallel worktree agents + merge cascade) is the *scenario that did not happen*; treat it as historical reference only.
+The Sprint 7 sequence is **VIM-48 first**, not parallel — the dogfood signal is meaningless without a deterministic test matrix. Don't fan out worktree agents on VIM-49 until VIM-48 is on `main`.
 
 ---
 
 ## State at session start
 
 ### Repo
-- Path: `C:\Users\ak\TaskGoblin` (TaskGoblin / VimbusProMax3000, Bun 1.3.13 monorepo).
-- Branch: `main`, 8 commits ahead of `origin/main`.
-- Working tree: only `.claude/worktrees/` should appear in `git status` (operational state, leave alone).
+- Path: `C:\Users\ak\TaskGoblin` (TaskGoblin / VimbusProMax3000, Bun 1.3.13 monorepo)
+- Branch: `main`
+- 2 commits ahead of `origin/main` (verify with `git rev-list --count origin/main..HEAD`):
+  - `5317bda` — `fix(VIM-39): update test assertions and timeouts for Sprint 6` (mcp counts 3→5 / 7→12, app smoke timeout 30s→60s)
+  - `b051ff6` — `docs(sprint-7): record actual Jira keys after filing` (key-mapping addendum on the plan)
+- Working tree expected clean except `.claude/worktrees/` (operational state, leave alone)
 
-### Commits to verify and push (oldest → newest)
+### Jira state
 
-| SHA prefix | Subject | Jira ticket | Risk |
-|---|---|---|---|
-| `74e5762` | `chore(mcp): add project-level .mcp.json for atlassian + slack` | none | low — config only; first launch will prompt to approve project MCP |
-| `88ecbbb` | `chore: add Sprint 6 deps and Postgres tooling scripts` | infra | medium — touches `bun.lock`, root + 3 package.json files; rerun `bun install` |
-| `7a27ecb` | `feat(VIM-46): dual-client + Postgres LoopEventBus startup wiring` | **VIM-46** | medium — `apps/api` boots through `installDefaultLoopEventBus`; sqlite path must still work |
-| `9550326` | `feat(VIM-39): browser MCP wrapper + a11y/visual verification dispatch` | **VIM-39** | high — adds Prisma migration `20260428150000_test_run_evidence_json`, new `taskgoblin-browser` MCP server, test-runner now dispatches a11y/visual instead of marking unsupported |
-| `85c87db` | `feat(VIM-40): hydrate benchmark runs from execution telemetry` | **VIM-40** | medium — `POST /benchmarks/scenarios/:id/runs` and `GET /benchmarks/scenarios` change shape (hydration metadata, taskExecutionId support, 404/422 error paths) |
-| `19b266b` | `feat(VIM-41): export LangSmith traces from execution agent` | **VIM-41** | medium — every execution completion now calls `exportExecutionLangSmithTrace`; ensure the env-disabled path still no-ops in tests |
-| `b95ef26` | `docs: post-Sprint-5 status snapshot and Sprint 6 prompt` | none | none |
-| `34972fe` | `chore(db): add push-postgres script and ignore generated postgres schema` | infra | none |
+**Sprint 6 — Done.** All four stories (VIM-46, VIM-39, VIM-40, VIM-41) carry the `sprint-6` label and have closure summary comments. Parent epics:
+- **VIM-26** Operator Console & live ops — **Done** (epic-close comment posted)
+- **VIM-27** Verification Breadth — **Done** (epic-close comment posted)
+- **VIM-28** Observability & production hardening — **still Open**, only child remaining is VIM-42 (rescoped, see below)
 
-VIM-46 / VIM-39 / VIM-40 / VIM-41 are all still in **To Do** in Jira with no `sprint-6` label. They got committed without ever being transitioned.
+**Sprint 7 — filed, all in To Do**:
+- **VIM-47** (Epic) — M2 Release Candidate & Dogfood
+- **VIM-48** (Story, 5 pts) — Test matrix and flake hardening
+- **VIM-49** (Story, 8 pts) — M2 golden-path dogfood harness (minimum viable)
+- **VIM-50** (Story, 2 pts) — Roadmap and runbook cleanup for M2
+- **VIM-51** (Story, 5 pts, stretch) — M2 golden-path full instrumentation
 
-### Pre-existing flakes (carry-overs — DO NOT try to fix in scope)
+Blocks links: VIM-48 → VIM-49, VIM-49 → VIM-51.
 
-| Flake | Where |
-|---|---|
-| `packages/planner/src/projectManagerPack.test.ts:158` agent-mirror text drift | snapshot drift, stable failure |
-| `packages/test-runner/src/index.test.ts` timing | non-deterministic under parallel pool |
-| `apps/api/src/app.test.ts > "dispatches approved visual items..."` | pre-existing on main; **may or may not be subsumed by VIM-39's dispatch change** — verify behaviour, don't bundle |
-| Occasional `db` repo `beforeEach` hook timeout | already at 30s; rare |
+**Sprint 8 backlog:**
+- **VIM-42** — Postgres production hardening (rescoped 8→5 pts; `sprint-8-backlog` label; comment with rescope rationale)
 
-### Bun PATH on Windows bash
+### M2 milestone
 
-Bun is at `/c/Users/ak/.bun/bin/bun.exe` but **not on bash's PATH**. Every bun command needs:
-```
-export PATH="/c/Users/ak/.bun/bin:$PATH" && bun ...
-```
+The closure criteria are persisted as a comment on VIM-47 (the epic description edit was harness-blocked at filing time — the comment is the source of truth until the description gets updated manually). Criteria:
 
-### Bash CWD discipline
+> M2 is declared shipped when:
+> 1. VIM-49 + VIM-48 + VIM-50 are Done.
+> 2. `origin/main` has all Sprint 7 work pushed.
+> 3. `bun run dogfood:m2` runs end-to-end on a clean machine without operator help.
+> 4. `bun run verify:m2` is deterministic — failures are product, not harness.
+> 5. `docs/runbooks/m2-golden-path.md` is the only doc a new operator needs.
 
-Always verify `pwd` and `cd /c/Users/ak/TaskGoblin` before running anything — the persistent shell can drift.
+### Plan source of truth
+
+`docs/SPRINT-7-PLAN.md` is authoritative. The doc body uses pre-create placeholder keys (VIM-47 = dogfood, VIM-49 = runbook); the actual Jira keys shifted by one because Jira auto-assigned VIM-47 to the epic. The mapping table at the top of the plan resolves placeholders to real keys.
+
+### Key Jira-key mapping reminder
+
+| Plan label | Actual Jira key | Role |
+|---|---|---|
+| (new epic) | **VIM-47** | M2 Release Candidate & Dogfood (Epic) |
+| VIM-48 | **VIM-48** | Test matrix and flake hardening |
+| VIM-47 | **VIM-49** | M2 golden-path dogfood harness (minimum viable) |
+| VIM-49 | **VIM-50** | Roadmap and runbook cleanup for M2 |
+| VIM-50 | **VIM-51** | M2 golden-path full instrumentation (stretch) |
+
+### Pre-existing carry-over flakes (these are VIM-48's primary targets, not "allow" anymore)
+
+| Flake | Where | Sprint 7 directive |
+|---|---|---|
+| `projectManagerPack.test.ts:158` snapshot drift | `packages/planner` | **Fix** in VIM-48. Source markdown drifted; mirror is stale. Either regenerate the mirror or delete the test if the assertion is no longer meaningful. |
+| `test-runner/src/index.test.ts` timing under parallel pool | `packages/test-runner` | **Fix or quarantine** in VIM-48. Passes 12/12 in isolation (88s); fails under parallel pool. Hypothesis: shared fs/db state across the parallel workers. Investigate before papering over with `singleFork`. |
+| `app.test.ts > "dispatches approved visual items..."` | `apps/api` | **Likely already subsumed** by VIM-39's dispatch change (passed in the Sprint 6 verification re-run). Confirm in VIM-48; if subsumed, remove from the carry-over list. |
+| Occasional `db` repo `beforeEach` hook timeout | `packages/db` | **Investigate, don't paper over.** Already at 30s; if it's still hitting that, there's a real issue. |
+
+### Known infrastructure friction
+
+- **Bun PATH on Windows bash** — bun lives at `/c/Users/ak/.bun/bin/bun.exe`, not on PATH. Every bun command needs `export PATH="/c/Users/ak/.bun/bin:$PATH" && bun ...`.
+- **Bash CWD discipline** — always verify `pwd` and `cd /c/Users/ak/TaskGoblin` before main-repo operations (the persistent shell can drift when worktree agents run).
+- **`.mcp.json` is now project-level** — atlassian (OAuth via mcp-remote) and slack (via `scripts/launch-slack-mcp.ps1`, sourcing creds from `.env.local`). First session start may prompt to approve project MCP servers.
 
 ---
 
 ## Process
 
-### 1. Pre-flight
+### 1. Pre-flight (≤2 min)
+
 ```
 cd /c/Users/ak/TaskGoblin
 pwd                                       # confirm /c/Users/ak/TaskGoblin
 git status -s                             # only .claude/worktrees/ expected
-git log --oneline origin/main..HEAD       # confirm 8 commits ahead
-git rev-list --count origin/main..HEAD    # expect 8
+git log --oneline -8
+git rev-list --count origin/main..HEAD    # expect 2
+```
+
+Ask the user to run **`! git push origin main`** to ship the 2 outstanding commits. The harness blocks `git push origin main` even in auto mode unless permitted. Do not retry the blocked push in a loop.
+
+```
 export PATH="/c/Users/ak/.bun/bin:$PATH" && bun install && bun run db:generate
+bun run typecheck                         # should exit 0
 ```
 
-If `db:generate` fails because of the new dual-client setup (sqlite + postgres), check `packages/db/scripts/generate-clients.ps1` — that's the new entry point for generating both clients.
+### 2. Read VIM-48 from Jira
 
-### 2. Typecheck + targeted test passes (in this order)
+Use `mcp__atlassian__getJiraIssue` for VIM-48 with `responseContentFormat: "markdown"`. The description has `## Why`, `## Acceptance criteria`, `## Out of scope`, `## Surface` sections from `docs/SPRINT-7-PLAN.md`. Read alongside the plan doc to make sure they agree.
+
+If you need to clarify, ask the user — don't invent acceptance criteria.
+
+### 3. Choose execution mode for VIM-48
+
+**Recommended: single-tree.** VIM-48 is small (5 pts), foundational, and you'll want fast iteration on the flake hunt. The worktree-agent fan-out adds branching overhead that doesn't pay off until VIM-49 (8 pts, larger surface).
+
+If you do fan out: spawn one agent for VIM-48 only. Don't spawn VIM-49 / VIM-50 yet — VIM-49 needs VIM-48 merged, and VIM-50 needs concrete runbook content from VIM-49.
+
+### 4. VIM-48 work plan (sketch — confirm against the Jira description)
+
+Roughly in priority order:
+
+1. **Diagnose the test-runner parallel-pool flake.** Start with: does it fail when you set `vitest --pool=forks --poolOptions.forks.singleFork=true`? If yes, the root cause is *not* parallelism — keep digging. If no, the cause is shared state across parallel workers; identify what's shared (filesystem, prisma client, ports?) before papering over.
+2. **Diagnose the projectManagerPack snapshot drift.** Read `.claude/agents/pm-sprint-planner.md` (source) and `plugins/taskgoblin-project-manager/.../pm-sprint-planner.md` (mirror). Decide: regenerate mirror, or delete the assertion if the test's contract is no longer load-bearing.
+3. **Stratify scripts.** Add at repo root:
+   - `test:unit` — fast non-stateful matrix, parallel pool
+   - `test:serial` — stateful tests requiring isolation, single fork
+   - `test:postgres` — Postgres-backed paths via docker-compose
+   - `verify:m2` — composite that runs all three in the right order
+4. **Ship `docker-compose.yml`** at repo root for Postgres smoke (used by both VIM-48 and downstream by VIM-49).
+5. **Document** in root `README.md` and `apps/api/README.md` which command is authoritative for "is the tree green."
+6. **Confirm** the `dispatches approved visual items` flake is gone after VIM-39's change. If it is, remove from the carry-over list at the top of `docs/SPRINT-7-PLAN.md`.
+
+### 5. Sprint 7 sequencing (don't break it)
 
 ```
-export PATH="/c/Users/ak/.bun/bin:$PATH"
-
-# Cheapest: typecheck the whole monorepo first.
-bun run typecheck
-
-# Then drill into the touched packages.
-bun run test:vitest -- packages/observability
-bun run test:vitest -- packages/agent
-bun run test:vitest -- packages/benchmarks
-bun run test:vitest -- packages/test-runner
-bun run test:vitest -- packages/mcp-client
-bun run test:vitest -- packages/verification
-bun run test:vitest -- apps/api
-bun run test:vitest -- apps/cli
+VIM-48 (test matrix)         <-- you are here, day 1-3
+   |
+   v
+VIM-48 merges to main        <-- day 4
+   |
+   +--> VIM-49 (dogfood, 8pt) <-- day 5-8
+   |       |
+   |       v
+   |    VIM-49 merges          <-- day 9
+   |       |
+   |       v
+   +--> VIM-50 (runbook, 2pt)  <-- day 10
+           |
+           v
+        VIM-50 merges          <-- end of committed slate
+           |
+           v
+        VIM-51 stretch?         <-- only if capacity remains
 ```
 
-Allow the four pre-existing flakes above. Anything else failing is on you to fix-forward (do **not** revert or squash existing commits — the history is already split by ticket).
+VIM-50 (runbook cleanup) is parallel-safe and could start as soon as VIM-49 has runbook content to document — typically late day 5 / day 6.
 
-If a fix is needed, commit it as a separate `fix(VIM-XX): ...` commit on top of the existing chain so the per-ticket attribution stays clean.
+### 6. Jira hygiene as you go
 
-### 3. Smoke the new behaviour you can reach without spawning a browser
+For VIM-48:
+- `mcp__atlassian__transitionJiraIssue` with `{"id": "21"}` (To Do → In Progress) when you start coding.
+- `mcp__atlassian__addCommentToJiraIssue` with a status comment on each significant decision (flake root cause, script stratification approach).
+- `mcp__atlassian__transitionJiraIssue` with `{"id": "31"}` (In Progress → In Review) when the PR / merge candidate is ready.
+- `mcp__atlassian__addCommentToJiraIssue` with merge SHA + ACs met + tests added when merging.
+- `mcp__atlassian__transitionJiraIssue` with `{"id": "41"}` (Done) after merge.
 
-- **VIM-46**: confirm sqlite path still works by running the api test suite. The Postgres path is exercised by `apps/api/README.md`'s manual two-process smoke — run it only if user wants a full smoke; otherwise rely on `apps/api/src/loopEventBus.test.ts`.
-- **VIM-39**: skip live browser smoke in this session (Playwright-Chromium download is heavy). Trust `packages/mcp-client/src/wrappers/browser.test.ts` + `packages/test-runner/src/index.test.ts`. The user can run the live smoke separately.
-- **VIM-40**: hit `GET /benchmarks/scenarios?taskExecutionId=...` and `POST /benchmarks/scenarios/:id/runs` with a recorded execution to confirm hydration actually pulls calls + verification items. The new `bun start /benchmark` CLI command is the easiest harness.
-- **VIM-41**: with `LANGSMITH_API_KEY` unset, the exporter must no-op silently. Confirm via the observability test suite.
+Cached transition IDs (verified in Sprint 6 close-out): 11=To Do, 21=In Progress, 31=In Review, 41=Done.
 
-### 4. Load Sprint 6 in Jira
+### 7. End-of-session summary expectations
 
-Cached transition IDs: To Do→In Progress = **21**, In Progress→Done = **41**, In Review = **31**.
-
-For each of VIM-46, VIM-39, VIM-40, VIM-41:
-- `mcp__atlassian__editJiraIssue` to add the `sprint-6` label (preserve existing labels — fetch first, append).
-- `mcp__atlassian__transitionJiraIssue` with `{"id": "21"}` (To Do → In Progress).
-- `mcp__atlassian__addCommentToJiraIssue` with `Loaded into Sprint 6 — 2026-07-06 to 2026-07-19. Implementation already drafted on local main (commit <sha>).`
-
-Then, immediately after, transition to **In Review** (`{"id": "31"}`) since the code is already written and waiting on verification.
-
-If the harness denies any transition or label edit (Sprint 5 hit this on epics), surface the failure to the user for a manual flip. Don't retry destructively.
-
-### 5. Push
-
-The harness blocks `git push origin main` even in auto mode unless the user has granted permission. Ask the user to either:
-- run `! git push origin main` themselves, or
-- grant a permission rule, or
-- have you push to a feature branch (`sprint-6-shipping`) and open a PR.
-
-**Do not retry the blocked push in a loop.**
-
-### 6. Close out per ticket
-
-After verification + push, for each of VIM-46, VIM-39, VIM-40, VIM-41:
-- `mcp__atlassian__addCommentToJiraIssue` with: merge SHA, files touched, tests added, ACs met, deferred follow-ups (if any).
-- `mcp__atlassian__transitionJiraIssue` with `{"id": "41"}` (In Review → Done).
-
-Then check the parent epics:
-- **VIM-26 (Operator console & live ops)** — closes only if VIM-46 was the last open child. Per `docs/STATUS-2026-04-28.md`, VIM-46 was the only remaining open child. **Eligible to close.**
-- **VIM-27 (Verification breadth)** — closes only if VIM-39 was the last open child. VIM-39 was the only child. **Eligible to close.**
-- **VIM-28 (Observability & production hardening)** — VIM-40 + VIM-41 close in this sprint, but **VIM-42 is still open** and unaddressed. **Do NOT close.** Surface to user that VIM-42 needs the rescoping pass before any future sprint pulls it in (overlap with the VIM-46 wiring this sprint just landed).
-
-If epic transitions are permission-blocked by the harness, surface that to the user for a manual flip.
-
-### 7. Final summary to user
-
-- Per-story result table (Story | Pts | Commit SHA | Tests added | Outcome).
-- Pending push status.
-- Two callouts:
-  1. **VIM-42 needs scoping** before it can be pulled into Sprint 7 (now overlaps with VIM-46 + VIM-45).
-  2. **The test-runner flake** (`packages/test-runner/src/index.test.ts` under parallel pool) is still unattended — file it as a small chore for whoever has slack.
-- Recommendation for Sprint 7 — the rescoped VIM-42, the test-runner flake chore, and any orphan / surface follow-ups discovered during this session.
+When you stop, surface:
+- VIM-48 status: Done / In Review / In Progress.
+- Flake diagnosis findings (root cause for each, fix path chosen).
+- Test scripts shipped (which of `test:unit` / `test:serial` / `test:postgres` / `verify:m2` exist).
+- `docker-compose.yml` status.
+- Next-session handoff: which sub-task to resume, or pivot to VIM-49 if VIM-48 is on `main`.
 
 ---
 
-## Things explicitly **not** in scope this session
+## Out of scope this session
 
-- **No new feature work.** Verify and ship what's already drafted.
-- **No squashing or rewriting** the 8 existing commits. If you find a bug, fix it forward in a new commit.
-- **No worktree-agent fan-out.** The `SPRINT-6-PROMPT.md` parallel-agent playbook does not apply because the work was done in a single tree.
-- **No live Playwright/Chromium browser smoke** unless the user explicitly asks. Trust the unit tests.
-- **No VIM-42 work.** It needs a scoping pass first.
+- **VIM-49 implementation** — scaffolding only if you have time and VIM-48 is in review. No real dogfood until VIM-48 merges.
+- **VIM-50 (runbook cleanup)** — needs concrete runbook content from VIM-49 first.
+- **VIM-51 stretch** — only after VIM-48 + VIM-49 land.
+- **VIM-42** — Sprint 8 backlog. Don't pull in.
+- **Anything in Sprint 8 backlog** (browser install hardening, LangSmith dataset linkage, PDF page diff, cloud deploy rehearsal, programmatic Postgres via testcontainers).
+- **Any new planner / UI / cloud features.**
+- **Squashing or rewriting** the Sprint 5 / 6 / 7-prep commit chain. Fix-forward in new commits.
 
 ---
 
 ## Auto mode + ultrathink
 
-Auto mode preferred. **ultrathink** on the verification step in particular — the test-runner change in VIM-39 may interact with the pre-existing `apps/api/src/app.test.ts > "dispatches approved visual items..."` flake (it could now pass, or fail differently). Read carefully before deciding whether the failure is on-list or new.
+Auto mode preferred. Make reasonable judgement calls without asking.
+
+**Ultrathink** on:
+1. The test-runner parallel-pool flake root cause. Don't accept the easy answer ("just use singleFork"); identify the shared resource. The decision shapes how every future test in the project gets written.
+2. Whether VIM-48 should land docker-compose now or whether testcontainers (Sprint 8 backlog item) is a faster path. The plan picks docker-compose, but if you find evidence that testcontainers is meaningfully better for *this* repo, surface that as a Sprint 8 prioritization point.
 
 **ultrathink**
