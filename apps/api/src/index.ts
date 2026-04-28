@@ -1,8 +1,11 @@
 import { createPrismaClient } from "@vimbuspromax3000/db";
 import { createVercelAiSdkAgentGeneratorFactory } from "@vimbuspromax3000/agent";
 import { createApp } from "./app";
+import { installDefaultLoopEventBus } from "./loopEventBus";
 
 const port = Number(process.env.PORT ?? 3000);
+
+await installDefaultLoopEventBus();
 
 // VIM-29 Sprint 2: production boot wires the real Vercel AI SDK adapter so
 // `POST /tasks/:id/execute` runs the agent loop end-to-end. Tests inject
