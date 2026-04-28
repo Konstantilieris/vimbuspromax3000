@@ -13,6 +13,8 @@ import {
   getTaskBranchDetail,
   getTaskExecutionContext,
   getTaskExecutionDetail,
+  listLoopEvents,
+  listMcpToolCallsForExecution,
   setTaskStatus,
   updateAgentStep,
   updatePatchReview,
@@ -20,6 +22,15 @@ import {
   updateTaskExecution,
 } from "@vimbuspromax3000/db";
 import { createMcpService } from "@vimbuspromax3000/mcp-client";
+import {
+  createLangSmithExporter,
+  createLangSmithTraceLinkService,
+  langSmithExporterConfigFromEnv,
+  type LangSmithExporter,
+  type LangSmithTraceExportInput,
+  type LangSmithTraceLink,
+  type LangSmithTraceLinkRepository,
+} from "@vimbuspromax3000/observability";
 import type { LoopEventType, ModelDecisionState } from "@vimbuspromax3000/shared";
 import { resolveModelSlot, selectExecutorSlotForAttempt } from "@vimbuspromax3000/policy-engine";
 import {
@@ -216,12 +227,16 @@ export function createExecutionService(options: {
   agentGeneratorFactory?: CreateAgentGenerator;
   /** Optional override for the loop turn budget. Default 25 (see policy doc). */
   agentLoopMaxTurns?: number;
+  /** Optional LangSmith exporter override for tests and controlled integrations. */
+  langSmithExporter?: LangSmithExporter;
 }): ExecutionService {
   const prisma = options.prisma;
   const env = options.env ?? process.env;
   const mcpService = createMcpService({ prisma });
   const agentGeneratorFactory = options.agentGeneratorFactory;
   const agentLoopMaxTurns = options.agentLoopMaxTurns;
+  const langSmithExporter =
+    options.langSmithExporter ?? createLangSmithExporter(langSmithExporterConfigFromEnv(env));
 
   return {
     async getTaskBranch(taskId) {
@@ -565,6 +580,12 @@ export function createExecutionService(options: {
       if (!detail) {
         throw new Error(`Task execution ${execution.id} was not found after creation.`);
       }
+
+      await exportExecutionLangSmithTrace({
+        prisma,
+        exporter: langSmithExporter,
+        execution: detail,
+      });
 
       return detail;
     },
@@ -969,6 +990,349 @@ function parseToolSchema(value: string | null | undefined): Record<string, unkno
     // Fall through to empty schema.
   }
   return {};
+}
+
+type TaskExecutionDetail = NonNullable<Awaited<ReturnType<typeof getTaskExecutionDetail>>>;
+type McpToolCallForExecution = Awaited<ReturnType<typeof listMcpToolCallsForExecution>>[number];
+type LoopEventRecord = Awaited<ReturnType<typeof listLoopEvents>>[number];
+
+async function exportExecutionLangSmithTrace(input: {
+  prisma: PrismaClient;
+  exporter: LangSmithExporter;
+  execution: TaskExecutionDetail;
+}) {
+  if (!input.exporter.enabled) {
+    return;
+  }
+
+  const projectId = input.execution.task.epic.project.id;
+  const [mcpCalls, events] = await Promise.all([
+    listMcpToolCallsForExecution(input.prisma, input.execution.id),
+    listLoopEvents(input.prisma, {
+      projectId,
+      taskExecutionId: input.execution.id,
+      limit: 1_000,
+    }),
+  ]);
+
+  const service = createLangSmithTraceLinkService({
+    repository: createPrismaLangSmithTraceLinkRepository(input.prisma),
+    eventSink: {
+      async append(event) {
+        await appendLoopEvent(input.prisma, {
+          projectId: event.projectId,
+          taskExecutionId: event.subjectType === "task_execution" ? event.subjectId : undefined,
+          type: event.type,
+          payload: event.payload,
+        });
+      },
+    },
+    exporter: input.exporter,
+    onExportError(error) {
+      void emitLangSmithExportWarning(input.prisma, {
+        projectId,
+        taskExecutionId: input.execution.id,
+        error,
+      });
+    },
+  });
+
+  await service.exportTrace({
+    projectId,
+    ...buildExecutionTraceExportInput(input.execution, mcpCalls, events),
+  });
+}
+
+function buildExecutionTraceExportInput(
+  execution: TaskExecutionDetail,
+  mcpCalls: McpToolCallForExecution[],
+  events: LoopEventRecord[],
+): LangSmithTraceExportInput {
+  const orderedAgentSteps = [...execution.agentSteps].sort(compareByStartOrCreateTime);
+  const toolCallsByStepId = groupToolCallsByAgentStep(mcpCalls, events, orderedAgentSteps);
+  const rootStartedAt = execution.startedAt ?? execution.createdAt;
+  const rootFinishedAt =
+    execution.finishedAt ??
+    latestDate([
+      ...orderedAgentSteps.map((step) => step.finishedAt ?? step.startedAt ?? step.createdAt),
+      ...mcpCalls.map((call) => call.finishedAt ?? call.createdAt),
+      execution.createdAt,
+    ]) ??
+    new Date();
+
+  return {
+    runName: `Task execution ${execution.task.stableId}`,
+    runType: "chain",
+    subjectType: "task_execution",
+    subjectId: execution.id,
+    startedAt: rootStartedAt,
+    finishedAt: rootFinishedAt,
+    error: execution.status === "failed" ? `Execution failed: ${execution.task.title}` : null,
+    inputs: {
+      task: {
+        id: execution.task.id,
+        stableId: execution.task.stableId,
+        title: execution.task.title,
+        type: execution.task.type,
+        complexity: execution.task.complexity,
+      },
+      branch: {
+        id: execution.branch.id,
+        name: execution.branch.name,
+        base: execution.branch.base,
+      },
+      policy: execution.policy,
+    },
+    outputs: {
+      status: execution.status,
+      retryCount: execution.retryCount,
+      latestAgentStepId: execution.latestAgentStep?.id ?? null,
+      latestPatchReviewId: execution.latestPatchReview?.id ?? null,
+    },
+    metadata: {
+      projectId: execution.task.epic.project.id,
+      projectName: execution.task.epic.project.name,
+      taskId: execution.task.id,
+      stableId: execution.task.stableId,
+      branchId: execution.branch.id,
+    },
+    childRuns: orderedAgentSteps.map((step, index) => ({
+      runName: `Agent step ${index + 1}: ${step.role}`,
+      runType: step.modelName ? "llm" : "chain",
+      startedAt: step.startedAt ?? step.createdAt,
+      finishedAt: step.finishedAt ?? step.startedAt ?? step.createdAt,
+      error: step.status === "failed" ? step.summary ?? "Agent step failed." : null,
+      inputs: {
+        role: step.role,
+        modelName: step.modelName,
+        inputHash: step.inputHash,
+      },
+      outputs: {
+        status: step.status,
+        summary: step.summary,
+        outputPath: step.outputPath,
+      },
+      metadata: {
+        agentStepId: step.id,
+        taskExecutionId: execution.id,
+        role: step.role,
+        modelName: step.modelName,
+      },
+      childRuns: (toolCallsByStepId.get(step.id) ?? []).map((call) => ({
+        runName: `MCP ${call.serverName}/${call.toolName}`,
+        runType: "tool",
+        startedAt: call.createdAt,
+        finishedAt: call.finishedAt ?? call.createdAt,
+        error:
+          call.status === "failed" || call.status === "blocked"
+            ? call.errorSummary ?? `MCP tool call ${call.status}.`
+            : null,
+        inputs: {
+          serverName: call.serverName,
+          toolName: call.toolName,
+          arguments: parseJsonOrNull(call.argumentsJson),
+          argumentsHash: call.argumentsHash,
+        },
+        outputs: {
+          status: call.status,
+          resultSummary: call.resultSummary,
+          errorSummary: call.errorSummary,
+          latencyMs: call.latencyMs,
+        },
+        metadata: {
+          mcpToolCallId: call.id,
+          taskExecutionId: execution.id,
+          mutability: call.mutability,
+          approvalId: call.approvalId,
+        },
+      })),
+    })),
+  };
+}
+
+function groupToolCallsByAgentStep(
+  mcpCalls: McpToolCallForExecution[],
+  events: LoopEventRecord[],
+  agentSteps: Array<{ id: string; startedAt: Date | null; finishedAt: Date | null; createdAt: Date }>,
+) {
+  const stepIdByCallId = new Map<string, string>();
+  let activeAgentStepId: string | null = null;
+
+  for (const event of events) {
+    const payload = asRecord(event.payload);
+
+    if (event.type === "agent.step.started") {
+      activeAgentStepId = asString(payload.agentStepId) ?? activeAgentStepId;
+      continue;
+    }
+
+    if (event.type === "mcp.tool.requested") {
+      const callId = asString(payload.callId);
+      if (callId && activeAgentStepId) {
+        stepIdByCallId.set(callId, activeAgentStepId);
+      }
+      continue;
+    }
+
+    if (event.type === "agent.step.completed") {
+      const completedStepId = asString(payload.agentStepId);
+      if (!completedStepId || completedStepId === activeAgentStepId) {
+        activeAgentStepId = null;
+      }
+    }
+  }
+
+  const grouped = new Map<string, McpToolCallForExecution[]>();
+  const orderedCalls = [...mcpCalls].sort(compareByCreateTime);
+
+  for (const call of orderedCalls) {
+    const stepId = stepIdByCallId.get(call.id) ?? findStepIdForToolCall(call, agentSteps);
+    if (!stepId) {
+      continue;
+    }
+
+    const calls = grouped.get(stepId) ?? [];
+    calls.push(call);
+    grouped.set(stepId, calls);
+  }
+
+  return grouped;
+}
+
+function findStepIdForToolCall(
+  call: McpToolCallForExecution,
+  agentSteps: Array<{ id: string; startedAt: Date | null; finishedAt: Date | null; createdAt: Date }>,
+) {
+  const callTime = call.createdAt.getTime();
+
+  for (const step of agentSteps) {
+    const start = (step.startedAt ?? step.createdAt).getTime();
+    const end = (step.finishedAt ?? step.startedAt ?? step.createdAt).getTime();
+
+    if (callTime >= start && callTime <= end) {
+      return step.id;
+    }
+  }
+
+  return null;
+}
+
+function createPrismaLangSmithTraceLinkRepository(prisma: PrismaClient): LangSmithTraceLinkRepository {
+  return {
+    async create(input) {
+      const link = await prisma.langSmithTraceLink.create({
+        data: input,
+      });
+      return toLangSmithTraceLink(link);
+    },
+    async list(filter) {
+      const links = await prisma.langSmithTraceLink.findMany({
+        where: {
+          projectId: filter.projectId,
+          subjectType: filter.subjectType,
+          subjectId: filter.subjectId,
+          syncStatus: filter.syncStatus,
+        },
+        orderBy: [{ createdAt: "desc" }],
+      });
+      return links.map(toLangSmithTraceLink);
+    },
+    async update(id, input) {
+      const link = await prisma.langSmithTraceLink.update({
+        where: { id },
+        data: input,
+      });
+      return toLangSmithTraceLink(link);
+    },
+  };
+}
+
+function toLangSmithTraceLink(link: {
+  id: string;
+  projectId: string;
+  subjectType: string;
+  subjectId: string;
+  traceUrl: string | null;
+  datasetId: string | null;
+  experimentId: string | null;
+  runId: string | null;
+  syncStatus: string;
+  createdAt: Date;
+  updatedAt: Date;
+}): LangSmithTraceLink {
+  return link as LangSmithTraceLink;
+}
+
+async function emitLangSmithExportWarning(
+  prisma: PrismaClient,
+  input: {
+    projectId: string;
+    taskExecutionId: string;
+    error: unknown;
+  },
+) {
+  try {
+    await appendLoopEvent(prisma, {
+      projectId: input.projectId,
+      taskExecutionId: input.taskExecutionId,
+      type: "operator.notification",
+      payload: {
+        severity: "warn",
+        subjectType: "task_execution",
+        subjectId: input.taskExecutionId,
+        code: "LANGSMITH_EXPORT_FAILED",
+        message: `LangSmith trace export failed: ${formatUnknownError(input.error)}`,
+      },
+    });
+  } catch {
+    // Export warning delivery is best-effort and must not affect execution.
+  }
+}
+
+function compareByStartOrCreateTime(
+  left: { startedAt: Date | null; createdAt: Date },
+  right: { startedAt: Date | null; createdAt: Date },
+) {
+  return (left.startedAt ?? left.createdAt).getTime() - (right.startedAt ?? right.createdAt).getTime();
+}
+
+function compareByCreateTime(left: { createdAt: Date }, right: { createdAt: Date }) {
+  return left.createdAt.getTime() - right.createdAt.getTime();
+}
+
+function latestDate(values: Array<Date | null | undefined>) {
+  return values.reduce<Date | null>((latest, value) => {
+    if (!value) {
+      return latest;
+    }
+    if (!latest || value.getTime() > latest.getTime()) {
+      return value;
+    }
+    return latest;
+  }, null);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function asString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function parseJsonOrNull(value: string | null) {
+  if (!value) {
+    return null;
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function formatUnknownError(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function requireReadyTaskContext(prisma: PrismaClient, taskId: string) {

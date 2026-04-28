@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   LANGSMITH_SYNC_STATUSES,
   type LangSmithSyncStatus,
@@ -88,14 +89,23 @@ export type LangSmithExporter = {
   exportTrace(input: LangSmithTraceExportInput): Promise<LangSmithTraceExportResult>;
 };
 
-export type LangSmithTraceExportInput = {
+export type LangSmithTraceRunInput = {
+  id?: string;
   projectName?: string;
   runName: string;
-  subjectType: string;
-  subjectId: string;
+  runType?: string;
+  startedAt?: Date | string | null;
+  finishedAt?: Date | string | null;
+  error?: string | null;
   inputs?: unknown;
   outputs?: unknown;
   metadata?: Record<string, unknown>;
+  childRuns?: LangSmithTraceRunInput[];
+};
+
+export type LangSmithTraceExportInput = LangSmithTraceRunInput & {
+  subjectType: string;
+  subjectId: string;
 };
 
 export type LangSmithTraceExportResult =
@@ -128,7 +138,13 @@ export type LangSmithExporterClient = {
     apiKey: string;
     endpoint: string;
     projectName?: string;
+    runId: string;
+    parentRunId?: string;
     runName: string;
+    runType: string;
+    startedAt: string;
+    finishedAt?: string;
+    error?: string;
     inputs?: unknown;
     outputs?: unknown;
     metadata: Record<string, unknown>;
@@ -364,36 +380,34 @@ export function createLangSmithExporter(
     return createNoopLangSmithExporter();
   }
 
-  if (!client) {
-    return createNoopLangSmithExporter();
-  }
-
   const endpoint = normalizeOptionalString(config.endpoint) ?? DEFAULT_LANGSMITH_ENDPOINT;
   const projectName = normalizeOptionalString(config.projectName);
+  const exporterClient = client ?? createLangSmithHttpClient();
 
   return {
     enabled: true,
     async exportTrace(input) {
       try {
-        const result = await client.createRun({
+        const rootResult = await exportLangSmithRunTree({
+          client: exporterClient,
           apiKey,
           endpoint,
           projectName: normalizeOptionalString(input.projectName) ?? projectName ?? undefined,
-          runName: requireNonEmptyString(input.runName, "runName"),
-          inputs: input.inputs,
-          outputs: input.outputs,
-          metadata: {
-            ...input.metadata,
-            subjectType: requireNonEmptyString(input.subjectType, "subjectType"),
-            subjectId: requireNonEmptyString(input.subjectId, "subjectId"),
+          run: {
+            ...input,
+            metadata: {
+              ...input.metadata,
+              subjectType: requireNonEmptyString(input.subjectType, "subjectType"),
+              subjectId: requireNonEmptyString(input.subjectId, "subjectId"),
+            },
           },
         });
 
         return {
           ok: true,
           skipped: false,
-          traceUrl: result.traceUrl,
-          runId: result.runId,
+          traceUrl: rootResult.traceUrl,
+          runId: rootResult.runId,
         };
       } catch (error) {
         return {
@@ -402,6 +416,55 @@ export function createLangSmithExporter(
           reason: error instanceof Error ? error.message : String(error),
         };
       }
+    },
+  };
+}
+
+export function createLangSmithHttpClient(fetchImpl: typeof fetch = fetch): LangSmithExporterClient {
+  return {
+    async createRun(input) {
+      const runId = requireNonEmptyString(input.runId, "runId");
+      const headers = {
+        accept: "application/json",
+        "content-type": "application/json",
+        "x-api-key": input.apiKey,
+      };
+      const createPayload = compactObject({
+        id: runId,
+        name: requireNonEmptyString(input.runName, "runName"),
+        run_type: requireNonEmptyString(input.runType, "runType"),
+        inputs: input.inputs ?? {},
+        start_time: input.startedAt,
+        session_name: normalizeOptionalString(input.projectName) ?? undefined,
+        parent_run_id: normalizeOptionalString(input.parentRunId) ?? undefined,
+        extra: Object.keys(input.metadata).length > 0 ? { metadata: input.metadata } : undefined,
+      });
+      const created = await requestLangSmithJson(fetchImpl, langSmithApiUrl(input.endpoint, "runs"), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(createPayload),
+      });
+      const persistedRunId = extractString(created, ["id", "run_id", "runId"]) ?? runId;
+      const updatePayload = compactObject({
+        outputs: input.outputs,
+        end_time: input.finishedAt,
+        error: input.error,
+      });
+
+      if (Object.keys(updatePayload).length > 0) {
+        await requestLangSmithJson(fetchImpl, langSmithApiUrl(input.endpoint, `runs/${persistedRunId}`), {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify(updatePayload),
+        });
+      }
+
+      return {
+        runId: persistedRunId,
+        traceUrl:
+          extractString(created, ["trace_url", "traceUrl", "url", "web_url", "webUrl", "app_url", "appUrl"]) ??
+          buildLangSmithTraceUrl(input.endpoint, persistedRunId),
+      };
     },
   };
 }
@@ -482,12 +545,134 @@ export function exportAndPersistLangSmithTraceNonBlocking(
 export function langSmithExporterConfigFromEnv(
   env: Record<string, string | undefined> = getDefaultEnv(),
 ): LangSmithExporterConfig {
+  const tracing = normalizeOptionalString(env.LANGSMITH_TRACING)?.toLowerCase();
+
   return {
     apiKey: env.LANGSMITH_API_KEY,
     endpoint: env.LANGSMITH_ENDPOINT,
     projectName: env.LANGSMITH_PROJECT,
-    enabled: normalizeOptionalString(env.LANGSMITH_TRACING)?.toLowerCase() !== "false",
+    enabled: tracing === "true" || tracing === "1",
   };
+}
+
+async function exportLangSmithRunTree(options: {
+  client: LangSmithExporterClient;
+  apiKey: string;
+  endpoint: string;
+  projectName?: string;
+  run: LangSmithTraceRunInput;
+  parentRunId?: string;
+}): Promise<{ runId: string; traceUrl: string }> {
+  const runId = normalizeOptionalString(options.run.id) ?? randomUUID();
+  const result = await options.client.createRun({
+    apiKey: options.apiKey,
+    endpoint: options.endpoint,
+    projectName: normalizeOptionalString(options.run.projectName) ?? options.projectName,
+    runId,
+    parentRunId: options.parentRunId,
+    runName: requireNonEmptyString(options.run.runName, "runName"),
+    runType: normalizeOptionalString(options.run.runType) ?? "chain",
+    startedAt: normalizeOptionalTimestamp(options.run.startedAt) ?? new Date().toISOString(),
+    finishedAt: normalizeOptionalTimestamp(options.run.finishedAt) ?? undefined,
+    error: normalizeOptionalString(options.run.error) ?? undefined,
+    inputs: options.run.inputs,
+    outputs: options.run.outputs,
+    metadata: options.run.metadata ?? {},
+  });
+  const persistedRunId = normalizeOptionalString(result.runId) ?? runId;
+
+  for (const child of options.run.childRuns ?? []) {
+    await exportLangSmithRunTree({
+      ...options,
+      run: child,
+      parentRunId: persistedRunId,
+    });
+  }
+
+  return {
+    runId: persistedRunId,
+    traceUrl: normalizeOptionalString(result.traceUrl) ?? buildLangSmithTraceUrl(options.endpoint, persistedRunId),
+  };
+}
+
+function normalizeOptionalTimestamp(value: Date | string | null | undefined) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return requireNonEmptyString(value, "timestamp");
+}
+
+function langSmithApiUrl(endpoint: string, path: string) {
+  const normalizedEndpoint = endpoint.endsWith("/") ? endpoint : `${endpoint}/`;
+  return new URL(path, normalizedEndpoint).toString();
+}
+
+async function requestLangSmithJson(
+  fetchImpl: typeof fetch,
+  url: string,
+  init: RequestInit,
+): Promise<unknown> {
+  const response = await fetchImpl(url, init);
+  const text = await response.text();
+  const parsed = text ? parseJson(text) : null;
+
+  if (!response.ok) {
+    const detail = text ? `: ${text.slice(0, 500)}` : "";
+    throw new Error(`LangSmith request failed with HTTP ${response.status}${detail}`);
+  }
+
+  return parsed;
+}
+
+function compactObject(input: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+}
+
+function extractString(value: unknown, keys: string[]) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
+}
+
+function buildLangSmithTraceUrl(endpoint: string, runId: string) {
+  try {
+    const apiUrl = new URL(endpoint);
+
+    if (apiUrl.hostname === "api.smith.langchain.com") {
+      return `https://smith.langchain.com/runs/${encodeURIComponent(runId)}`;
+    }
+
+    if (apiUrl.hostname.endsWith(".smith.langchain.com")) {
+      return `https://smith.langchain.com/runs/${encodeURIComponent(runId)}`;
+    }
+
+    return `${apiUrl.origin}/runs/${encodeURIComponent(runId)}`;
+  } catch {
+    return `https://smith.langchain.com/runs/${encodeURIComponent(runId)}`;
+  }
+}
+
+function parseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 function getDefaultEnv(): Record<string, string | undefined> {

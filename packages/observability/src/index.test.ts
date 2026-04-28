@@ -2,9 +2,11 @@ import {
   createLangSmithExporter,
   createLangSmithTraceLinkService,
   exportLangSmithTraceNonBlocking,
+  langSmithExporterConfigFromEnv,
   normalizeCreateLangSmithTraceLinkInput,
   normalizeUpdateLangSmithTraceLinkInput,
   validateLangSmithTraceUrl,
+  type LangSmithExporterClient,
   type LangSmithTraceLink,
   type LangSmithTraceLinkRepository,
 } from "./index";
@@ -173,6 +175,7 @@ describe("LangSmith trace link service", () => {
       exporter: createLangSmithExporter(
         {
           apiKey: "key",
+          enabled: true,
         },
         {
           async createRun() {
@@ -230,6 +233,7 @@ describe("LangSmith trace link service", () => {
       exporter: createLangSmithExporter(
         {
           apiKey: "key",
+          enabled: true,
         },
         {
           async createRun() {
@@ -278,10 +282,32 @@ describe("LangSmith exporter", () => {
     });
   });
 
+  test("is disabled by default unless tracing is explicitly enabled", () => {
+    expect(
+      langSmithExporterConfigFromEnv({
+        LANGSMITH_API_KEY: "key",
+      }),
+    ).toMatchObject({
+      apiKey: "key",
+      enabled: false,
+    });
+
+    expect(
+      langSmithExporterConfigFromEnv({
+        LANGSMITH_API_KEY: "key",
+        LANGSMITH_TRACING: "true",
+      }),
+    ).toMatchObject({
+      apiKey: "key",
+      enabled: true,
+    });
+  });
+
   test("accepts enabled exports without blocking the caller", () => {
     const exporter = createLangSmithExporter(
       {
         apiKey: "key",
+        enabled: true,
       },
       {
         async createRun() {
@@ -302,6 +328,77 @@ describe("LangSmith exporter", () => {
     ).toEqual({
       accepted: true,
       skipped: false,
+    });
+  });
+
+  test("exports child and grandchild runs through an injected client", async () => {
+    const calls: Array<Parameters<LangSmithExporterClient["createRun"]>[0]> = [];
+    const exporter = createLangSmithExporter(
+      {
+        apiKey: "key",
+        enabled: true,
+        projectName: "TaskGoblin",
+      },
+      {
+        async createRun(input) {
+          calls.push(input);
+          return {
+            traceUrl: input.parentRunId ? undefined : "https://smith.langchain.com/runs/root-run",
+            runId: input.runId,
+          };
+        },
+      },
+    );
+
+    await expect(
+      exporter.exportTrace({
+        id: "root-run",
+        runName: "Task execution TASK-1",
+        runType: "chain",
+        subjectType: "task_execution",
+        subjectId: "execution-1",
+        childRuns: [
+          {
+            id: "step-run",
+            runName: "Agent step 1",
+            runType: "llm",
+            childRuns: [
+              {
+                id: "tool-run",
+                runName: "MCP taskgoblin-fs-git/read_file",
+                runType: "tool",
+              },
+            ],
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      skipped: false,
+      traceUrl: "https://smith.langchain.com/runs/root-run",
+      runId: "root-run",
+    });
+
+    expect(calls.map((call) => ({ runId: call.runId, parentRunId: call.parentRunId, runType: call.runType }))).toEqual([
+      {
+        runId: "root-run",
+        parentRunId: undefined,
+        runType: "chain",
+      },
+      {
+        runId: "step-run",
+        parentRunId: "root-run",
+        runType: "llm",
+      },
+      {
+        runId: "tool-run",
+        parentRunId: "step-run",
+        runType: "tool",
+      },
+    ]);
+    expect(calls[0]?.metadata).toMatchObject({
+      subjectType: "task_execution",
+      subjectId: "execution-1",
     });
   });
 });
