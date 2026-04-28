@@ -6,6 +6,15 @@ import {
   DB_QUERY_TOOL_NAME,
   TASKGOBLIN_DB_SERVER_NAME,
 } from "./wrappers/db";
+import {
+  BROWSER_NAVIGATE_INPUT_SCHEMA,
+  BROWSER_NAVIGATE_TOOL_NAME,
+  BROWSER_RUN_AXE_INPUT_SCHEMA,
+  BROWSER_RUN_AXE_TOOL_NAME,
+  BROWSER_SCREENSHOT_INPUT_SCHEMA,
+  BROWSER_SCREENSHOT_TOOL_NAME,
+  TASKGOBLIN_BROWSER_SERVER_NAME,
+} from "./wrappers/browser";
 import { APPLY_PATCH_INPUT_SCHEMA, TASKGOBLIN_PATCH_SERVER_NAME } from "./wrappers/patch";
 
 type ToolDefinition = {
@@ -135,6 +144,34 @@ export const STANDARD_MCP_SERVERS: ServerDefinition[] = [
         mutability: "read",
         approvalRequired: false,
         inputSchemaJson: JSON.stringify(DB_LIST_TABLES_INPUT_SCHEMA),
+      },
+    ],
+  },
+  {
+    name: TASKGOBLIN_BROWSER_SERVER_NAME,
+    transport: "stdio",
+    trustLevel: "trusted",
+    tools: [
+      {
+        name: BROWSER_NAVIGATE_TOOL_NAME,
+        description: "Navigate a Chromium page to a URL and report the loaded document metadata.",
+        mutability: "read",
+        approvalRequired: false,
+        inputSchemaJson: JSON.stringify(BROWSER_NAVIGATE_INPUT_SCHEMA),
+      },
+      {
+        name: BROWSER_SCREENSHOT_TOOL_NAME,
+        description: "Capture a Chromium screenshot to an artifact path for visual verification.",
+        mutability: "read",
+        approvalRequired: false,
+        inputSchemaJson: JSON.stringify(BROWSER_SCREENSHOT_INPUT_SCHEMA),
+      },
+      {
+        name: BROWSER_RUN_AXE_TOOL_NAME,
+        description: "Run axe-core against a loaded page and return accessibility violations.",
+        mutability: "read",
+        approvalRequired: false,
+        inputSchemaJson: JSON.stringify(BROWSER_RUN_AXE_INPUT_SCHEMA),
       },
     ],
   },

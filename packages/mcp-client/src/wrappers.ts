@@ -14,6 +14,13 @@ import {
   resolve,
 } from "node:path";
 import type { McpMutability } from "@vimbuspromax3000/shared";
+import {
+  BROWSER_NAVIGATE_TOOL_NAME,
+  BROWSER_RUN_AXE_TOOL_NAME,
+  BROWSER_SCREENSHOT_TOOL_NAME,
+  createBrowserWrapper,
+  TASKGOBLIN_BROWSER_SERVER_NAME,
+} from "./wrappers/browser";
 
 export type McpWrapperExecutionContext = {
   rootPath: string;
@@ -28,7 +35,10 @@ type McpWrapperDefinition = {
   serverName: string;
   toolName: string;
   mutability: McpMutability;
-  execute(args: Record<string, unknown>, context: McpWrapperExecutionContext): McpWrapperResult;
+  execute(
+    args: Record<string, unknown>,
+    context: McpWrapperExecutionContext,
+  ): McpWrapperResult | Promise<McpWrapperResult>;
 };
 
 export class McpPolicyError extends Error {
@@ -63,6 +73,7 @@ const SKIPPED_GREP_DIRECTORIES = new Set([
   "dist",
   "node_modules",
 ]);
+const BROWSER_WRAPPER = createBrowserWrapper();
 
 const WRAPPERS: McpWrapperDefinition[] = [
   {
@@ -277,6 +288,57 @@ const WRAPPERS: McpWrapperDefinition[] = [
       };
     },
   },
+  {
+    serverName: TASKGOBLIN_BROWSER_SERVER_NAME,
+    toolName: BROWSER_NAVIGATE_TOOL_NAME,
+    mutability: "read",
+    async execute(args) {
+      const result = await BROWSER_WRAPPER.navigate(args);
+
+      if (!result.ok) {
+        throw new McpWrapperExecutionError(result.message, result.code);
+      }
+
+      return {
+        summary: `Navigated to ${result.url}${result.status === null ? "" : ` (${result.status})`}.`,
+        data: result,
+      };
+    },
+  },
+  {
+    serverName: TASKGOBLIN_BROWSER_SERVER_NAME,
+    toolName: BROWSER_SCREENSHOT_TOOL_NAME,
+    mutability: "read",
+    async execute(args) {
+      const result = await BROWSER_WRAPPER.screenshot(args);
+
+      if (!result.ok) {
+        throw new McpWrapperExecutionError(result.message, result.code);
+      }
+
+      return {
+        summary: `Captured screenshot ${result.path} (${result.bytes} bytes).`,
+        data: result,
+      };
+    },
+  },
+  {
+    serverName: TASKGOBLIN_BROWSER_SERVER_NAME,
+    toolName: BROWSER_RUN_AXE_TOOL_NAME,
+    mutability: "read",
+    async execute(args) {
+      const result = await BROWSER_WRAPPER.runAxe(args);
+
+      if (!result.ok) {
+        throw new McpWrapperExecutionError(result.message, result.code);
+      }
+
+      return {
+        summary: `Axe reported ${result.violationCount} violation${result.violationCount === 1 ? "" : "s"}.`,
+        data: result,
+      };
+    },
+  },
 ];
 
 export function getMcpWrapperDefinition(serverName: string, toolName: string) {
@@ -289,7 +351,7 @@ export function executeMcpWrapper(input: {
   mutability: string;
   args: Record<string, unknown>;
   context: McpWrapperExecutionContext;
-}): McpWrapperResult {
+}): McpWrapperResult | Promise<McpWrapperResult> {
   const wrapper = getMcpWrapperDefinition(input.serverName, input.toolName);
 
   if (!wrapper) {

@@ -7,6 +7,15 @@ import {
   TASKGOBLIN_DB_SERVER_NAME,
 } from "./db";
 import {
+  BROWSER_NAVIGATE_INPUT_SCHEMA,
+  BROWSER_NAVIGATE_TOOL_NAME,
+  BROWSER_RUN_AXE_INPUT_SCHEMA,
+  BROWSER_RUN_AXE_TOOL_NAME,
+  BROWSER_SCREENSHOT_INPUT_SCHEMA,
+  BROWSER_SCREENSHOT_TOOL_NAME,
+  TASKGOBLIN_BROWSER_SERVER_NAME,
+} from "./browser";
+import {
   APPLY_PATCH_INPUT_SCHEMA,
   APPLY_PATCH_TOOL_NAME,
   TASKGOBLIN_PATCH_SERVER_NAME,
@@ -52,6 +61,35 @@ export type {
   DbReadErrorCode,
   DbWrapper,
 } from "./db";
+
+export {
+  BROWSER_NAVIGATE_INPUT_SCHEMA,
+  BROWSER_NAVIGATE_TOOL_NAME,
+  BROWSER_RUN_AXE_INPUT_SCHEMA,
+  BROWSER_RUN_AXE_TOOL_NAME,
+  BROWSER_SCREENSHOT_INPUT_SCHEMA,
+  BROWSER_SCREENSHOT_TOOL_NAME,
+  createBrowserWrapper,
+  TASKGOBLIN_BROWSER_SERVER_NAME,
+} from "./browser";
+
+export type {
+  BrowserAxeSuccess,
+  BrowserAxeViolation,
+  BrowserFailure,
+  BrowserNavigateInput,
+  BrowserNavigateResult,
+  BrowserNavigateSuccess,
+  BrowserRunAxeInput,
+  BrowserRunAxeResult,
+  BrowserScreenshotInput,
+  BrowserScreenshotResult,
+  BrowserScreenshotSuccess,
+  BrowserViewport,
+  BrowserWrapper,
+  BrowserWrapperErrorCode,
+  BrowserWrapperRuntime,
+} from "./browser";
 
 export type WrapperToolDefinition = {
   name: string;
@@ -114,6 +152,34 @@ export const WRAPPER_SERVER_REGISTRY: WrapperServerDefinition[] = [
         mutability: "read",
         approvalRequired: false,
         inputSchema: DB_LIST_TABLES_INPUT_SCHEMA as unknown as Record<string, unknown>,
+      },
+    ],
+  },
+  {
+    name: TASKGOBLIN_BROWSER_SERVER_NAME,
+    label: "TaskGoblin browser verification",
+    trustLevel: "trusted",
+    tools: [
+      {
+        name: BROWSER_NAVIGATE_TOOL_NAME,
+        description: "Navigate a Chromium page to a URL and report the loaded document metadata.",
+        mutability: "read",
+        approvalRequired: false,
+        inputSchema: BROWSER_NAVIGATE_INPUT_SCHEMA as unknown as Record<string, unknown>,
+      },
+      {
+        name: BROWSER_SCREENSHOT_TOOL_NAME,
+        description: "Capture a Chromium screenshot to an artifact path for visual verification.",
+        mutability: "read",
+        approvalRequired: false,
+        inputSchema: BROWSER_SCREENSHOT_INPUT_SCHEMA as unknown as Record<string, unknown>,
+      },
+      {
+        name: BROWSER_RUN_AXE_TOOL_NAME,
+        description: "Run axe-core against a loaded page and return accessibility violations.",
+        mutability: "read",
+        approvalRequired: false,
+        inputSchema: BROWSER_RUN_AXE_INPUT_SCHEMA as unknown as Record<string, unknown>,
       },
     ],
   },

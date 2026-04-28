@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { PrismaClient } from "@vimbuspromax3000/db/client";
 import {
   appendLoopEvent,
@@ -18,6 +20,13 @@ import {
   updateTestRun,
   type TestRunPhase,
 } from "@vimbuspromax3000/db";
+import {
+  captureScreenshot,
+  compareImages,
+  navigateBrowser,
+  runAxe,
+  type ImageDiffResult,
+} from "@vimbuspromax3000/verification";
 
 export type TestRunnerEligibilityErrorCode =
   | "NO_APPROVED_VERIFICATION_ITEMS"
@@ -127,12 +136,28 @@ type CommandRunnerResult = {
 type ExecutionVerificationContext = NonNullable<Awaited<ReturnType<typeof getExecutionVerificationRunContext>>>;
 type VerificationRunItem = NonNullable<ExecutionVerificationContext["latestApprovedVerificationPlan"]>["items"][number];
 
+type BrowserVerificationRunner = {
+  navigate: typeof navigateBrowser;
+  screenshot: typeof captureScreenshot;
+  runAxe: typeof runAxe;
+  compareImages: typeof compareImages;
+};
+
+const defaultBrowserVerificationRunner: BrowserVerificationRunner = {
+  navigate: navigateBrowser,
+  screenshot: captureScreenshot,
+  runAxe,
+  compareImages,
+};
+
 export function createTestRunnerService(options: {
   prisma: PrismaClient;
   commandRunner?: (input: CommandRunnerInput) => CommandRunnerResult;
+  browserRunner?: BrowserVerificationRunner;
 }): TestRunnerService {
   const prisma = options.prisma;
   const commandRunner = options.commandRunner ?? runCapturedCommand;
+  const browserRunner = options.browserRunner ?? defaultBrowserVerificationRunner;
 
   return {
     async listExecutionTestRuns(executionId) {
@@ -170,7 +195,12 @@ export function createTestRunnerService(options: {
       }
 
       const unsupportedItems = items
-        .filter((item) => !hasExecutableCommand(item.command) && !isVisualVerificationDispatchItem(item))
+        .filter(
+          (item) =>
+            !hasExecutableCommand(item.command) &&
+            !isVisualVerificationDispatchItem(item) &&
+            !isA11yVerificationDispatchItem(item),
+        )
         .map((item) => ({
           id: item.id,
           kind: item.kind,
@@ -247,12 +277,21 @@ export function createTestRunnerService(options: {
       let hasFailure = false;
       for (const item of items) {
         if (!hasExecutableCommand(item.command)) {
-          const result = await runVisualVerificationItem({
-            prisma,
-            execution,
-            project,
-            item,
-          });
+          const result = isA11yVerificationDispatchItem(item)
+            ? await runA11yVerificationItem({
+                prisma,
+                execution,
+                project,
+                item,
+                browserRunner,
+              })
+            : await runVisualVerificationItem({
+                prisma,
+                execution,
+                project,
+                item,
+                browserRunner,
+              });
 
           if (result.status !== "passed") {
             hasFailure = true;
@@ -318,7 +357,12 @@ export function createTestRunnerService(options: {
       }
 
       const unsupportedItems = items
-        .filter((item) => !hasExecutableCommand(item.command) && !isVisualVerificationDispatchItem(item))
+        .filter(
+          (item) =>
+            !hasExecutableCommand(item.command) &&
+            !isVisualVerificationDispatchItem(item) &&
+            !isA11yVerificationDispatchItem(item),
+        )
         .map((item) => ({
           id: item.id,
           kind: item.kind,
@@ -347,12 +391,21 @@ export function createTestRunnerService(options: {
 
       for (const item of items) {
         if (!hasExecutableCommand(item.command)) {
-          const result = await runVisualVerificationItem({
-            prisma,
-            execution,
-            project,
-            item,
-          });
+          const result = isA11yVerificationDispatchItem(item)
+            ? await runA11yVerificationItem({
+                prisma,
+                execution,
+                project,
+                item,
+                browserRunner,
+              })
+            : await runVisualVerificationItem({
+                prisma,
+                execution,
+                project,
+                item,
+                browserRunner,
+              });
 
           if (result.status !== "passed") {
             hasFailure = true;
@@ -731,6 +784,7 @@ async function runVisualVerificationItem(input: {
   execution: ExecutionVerificationContext;
   project: ExecutionVerificationContext["task"]["epic"]["project"];
   item: VerificationRunItem;
+  browserRunner: BrowserVerificationRunner;
 }) {
   const startedAt = new Date();
   const mode = resolveVisualVerificationMode(input.item);
@@ -740,6 +794,18 @@ async function runVisualVerificationItem(input: {
     input.execution.task.id,
     input.item,
   );
+
+  const targetUrl = resolveBrowserTargetUrl(input.project.rootPath, input.item);
+  if (sourceAsset.usable && sourceAsset.asset && targetUrl && isBrowserVisualMode(mode)) {
+    return runBrowserVisualVerificationItem({
+      ...input,
+      sourceAsset: sourceAsset.asset,
+      targetUrl,
+      mode,
+      startedAt,
+    });
+  }
+
   const finishedAt = new Date();
   const status = sourceAsset.usable ? "passed" : "blocked";
   const itemStatus = status === "passed" ? "green" : "failed";
@@ -822,6 +888,265 @@ async function runVisualVerificationItem(input: {
   return {
     status,
   };
+}
+
+async function runA11yVerificationItem(input: {
+  prisma: PrismaClient;
+  execution: ExecutionVerificationContext;
+  project: ExecutionVerificationContext["task"]["epic"]["project"];
+  item: VerificationRunItem;
+  browserRunner: BrowserVerificationRunner;
+}) {
+  const startedAt = new Date();
+  const targetUrl = resolveBrowserTargetUrl(input.project.rootPath, input.item);
+  const command = targetUrl ? `taskgoblin-browser.run_axe ${targetUrl}` : "taskgoblin-browser.run_axe";
+  const testRun = await input.prisma.$transaction(async (tx) => {
+    const created = await createTestRun(tx, {
+      taskExecutionId: input.execution.id,
+      verificationItemId: input.item.id,
+      command,
+      status: "running",
+      startedAt,
+    });
+
+    await tx.verificationItem.update({
+      where: { id: input.item.id },
+      data: { status: "running" },
+    });
+
+    await appendLoopEvent(tx, {
+      projectId: input.project.id,
+      taskExecutionId: input.execution.id,
+      type: "test.started",
+      payload: {
+        taskId: input.execution.task.id,
+        verificationItemId: input.item.id,
+        testRunId: created.id,
+        command,
+        kind: "a11y",
+      },
+    });
+
+    return created;
+  });
+
+  let evidence: Record<string, unknown>;
+  let status: "passed" | "failed";
+  let exitCode: number;
+
+  if (!targetUrl) {
+    evidence = {
+      error: "A11y verification requires config.url, config.targetUrl, or route.",
+    };
+    status = "failed";
+    exitCode = 1;
+  } else {
+    try {
+      const result = await input.browserRunner.runAxe({
+        url: targetUrl,
+        viewport: resolveBrowserViewport(input.item),
+        browserExecutablePath: resolveBrowserExecutablePath(input.item),
+      });
+      evidence = {
+        url: result.url,
+        violationCount: result.violationCount,
+        violations: result.violations,
+      };
+      status = result.violationCount === 0 ? "passed" : "failed";
+      exitCode = status === "passed" ? 0 : 1;
+    } catch (error) {
+      evidence = {
+        url: targetUrl,
+        error: error instanceof Error ? error.message : String(error),
+      };
+      status = "failed";
+      exitCode = 1;
+    }
+  }
+
+  const finishedAt = new Date();
+  const itemStatus = status === "passed" ? "green" : "failed";
+
+  await input.prisma.$transaction(async (tx) => {
+    await updateTestRun(tx, testRun.id, {
+      status,
+      exitCode,
+      evidenceJson: JSON.stringify(evidence),
+      finishedAt,
+    });
+
+    await tx.verificationItem.update({
+      where: { id: input.item.id },
+      data: { status: itemStatus },
+    });
+
+    await appendLoopEvent(tx, {
+      projectId: input.project.id,
+      taskExecutionId: input.execution.id,
+      type: "test.finished",
+      payload: {
+        taskId: input.execution.task.id,
+        verificationItemId: input.item.id,
+        testRunId: testRun.id,
+        exitCode,
+        status,
+        kind: "a11y",
+        violationCount: typeof evidence.violationCount === "number" ? evidence.violationCount : null,
+      },
+    });
+  });
+
+  return { status };
+}
+
+async function runBrowserVisualVerificationItem(input: {
+  prisma: PrismaClient;
+  execution: ExecutionVerificationContext;
+  project: ExecutionVerificationContext["task"]["epic"]["project"];
+  item: VerificationRunItem;
+  browserRunner: BrowserVerificationRunner;
+  sourceAsset: NonNullable<Awaited<ReturnType<typeof resolveVisualSourceAsset>>["asset"]>;
+  targetUrl: string;
+  mode: string;
+  startedAt: Date;
+}) {
+  const artifactDirectory = buildBrowserArtifactDirectory({
+    rootPath: input.project.rootPath,
+    executionId: input.execution.id,
+    orderIndex: input.item.orderIndex,
+    verificationItemId: input.item.id,
+    mode: input.mode,
+  });
+  mkdirSync(artifactDirectory, { recursive: true });
+
+  const actualPath = normalizePath(join(artifactDirectory, "actual.png"));
+  const diffPath = normalizePath(join(artifactDirectory, "diff.png"));
+  const expectedPath = normalizePath(join(input.project.rootPath, input.sourceAsset.relativePath));
+  const threshold = resolveVisualDiffThreshold(input.item);
+
+  await input.prisma.$transaction(async (tx) => {
+    await tx.verificationItem.update({
+      where: { id: input.item.id },
+      data: { status: "running" },
+    });
+
+    await appendLoopEvent(tx, {
+      projectId: input.project.id,
+      taskExecutionId: input.execution.id,
+      type: "visual.started",
+      payload: {
+        taskId: input.execution.task.id,
+        verificationItemId: input.item.id,
+        mode: input.mode,
+        sourceAssetId: input.sourceAsset.id,
+        expectedAssetId: input.item.expectedAssetId ?? null,
+        targetUrl: input.targetUrl,
+      },
+    });
+  });
+
+  let status: "passed" | "failed";
+  let summary: string;
+  let metadata: Record<string, unknown>;
+  let compareResult: ImageDiffResult | null = null;
+
+  try {
+    const viewport = resolveBrowserViewport(input.item);
+    const browserExecutablePath = resolveBrowserExecutablePath(input.item);
+    const navigation = await input.browserRunner.navigate({
+      url: input.targetUrl,
+      viewport,
+      browserExecutablePath,
+    });
+
+    await input.browserRunner.screenshot({
+      url: input.targetUrl,
+      outputPath: actualPath,
+      viewport,
+      fullPage: resolveFullPage(input.item),
+      browserExecutablePath,
+    });
+
+    compareResult = await input.browserRunner.compareImages(actualPath, expectedPath, {
+      threshold: resolvePixelmatchThreshold(input.item),
+      diffOutputPath: diffPath,
+    });
+    const diffRatio = getImageDiffRatio(compareResult);
+    status = compareResult.matched || diffRatio <= threshold ? "passed" : "failed";
+    summary =
+      status === "passed"
+        ? "Browser screenshot matched the expected visual asset."
+        : "Browser screenshot differed from the expected visual asset.";
+    metadata = {
+      targetUrl: input.targetUrl,
+      navigation,
+      expectedPath,
+      actualPath,
+      diffPath,
+      compareResult,
+      threshold,
+      diffRatio,
+    };
+  } catch (error) {
+    status = "failed";
+    summary = error instanceof Error ? error.message : String(error);
+    metadata = {
+      targetUrl: input.targetUrl,
+      expectedPath,
+      actualPath,
+      error: summary,
+    };
+  }
+
+  const finishedAt = new Date();
+  const itemStatus = status === "passed" ? "green" : "failed";
+  const diffRatio = compareResult ? getImageDiffRatio(compareResult) : null;
+
+  await input.prisma.$transaction(async (tx) => {
+    const result = await persistVisualVerificationResult(tx, {
+      taskExecutionId: input.execution.id,
+      verificationItemId: input.item.id,
+      sourceAssetId: input.sourceAsset.id,
+      mode: input.mode,
+      status,
+      summary,
+      artifactDirectory,
+      actualPath,
+      diffPath,
+      sha256: fileSha256OrNull(actualPath),
+      diffRatio,
+      threshold,
+      metadata,
+      startedAt: input.startedAt,
+      finishedAt,
+    });
+
+    await tx.verificationItem.update({
+      where: { id: input.item.id },
+      data: { status: itemStatus },
+    });
+
+    await appendLoopEvent(tx, {
+      projectId: input.project.id,
+      taskExecutionId: input.execution.id,
+      type: "visual.finished",
+      payload: {
+        taskId: input.execution.task.id,
+        verificationItemId: input.item.id,
+        visualVerificationResultId: result.id,
+        mode: input.mode,
+        status,
+        sourceAssetId: input.sourceAsset.id,
+        expectedAssetId: input.item.expectedAssetId ?? null,
+        targetUrl: input.targetUrl,
+        diffRatio,
+        threshold,
+        summary,
+      },
+    });
+  });
+
+  return { status };
 }
 
 function runCapturedCommand(input: CommandRunnerInput): CommandRunnerResult {
@@ -907,6 +1232,15 @@ function isVisualVerificationDispatchItem(item: VerificationRunItem) {
   );
 }
 
+function isA11yVerificationDispatchItem(item: VerificationRunItem) {
+  const kind = normalizeVisualToken(item.kind);
+  const runner = normalizeVisualToken(item.runner);
+  const config = parseJsonObject(item.configJson);
+  const mode = normalizeVisualToken(stringFromUnknown(config.mode) ?? stringFromUnknown(config.a11yMode));
+
+  return kind === "a11y" || kind === "accessibility" || runner === "axe" || mode === "axe";
+}
+
 function resolveVisualVerificationMode(item: VerificationRunItem) {
   const config = parseJsonObject(item.configJson);
   const configuredMode =
@@ -931,6 +1265,122 @@ function resolveVisualVerificationMode(item: VerificationRunItem) {
   }
 
   return "asset-presence";
+}
+
+function isBrowserVisualMode(mode: string) {
+  return ["screenshot", "pixel-diff", "screenshot-diff", "visual-diff"].includes(normalizeVisualToken(mode));
+}
+
+function resolveBrowserTargetUrl(rootPath: string, item: VerificationRunItem) {
+  const config = parseJsonObject(item.configJson);
+  const raw =
+    stringFromUnknown(config.url) ??
+    stringFromUnknown(config.targetUrl) ??
+    stringFromUnknown(config.href) ??
+    stringFromUnknown(item.route);
+
+  if (!raw) {
+    return null;
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
+    return raw;
+  }
+
+  const baseUrl = stringFromUnknown(config.baseUrl);
+  if (baseUrl) {
+    return new URL(raw, baseUrl).toString();
+  }
+
+  const relativePath = raw.replace(/^[/\\]+/, "");
+  const absolutePath = isAbsolute(raw) ? raw : join(rootPath, relativePath);
+  return pathToFileURL(absolutePath).toString();
+}
+
+function resolveBrowserViewport(item: VerificationRunItem) {
+  const config = parseJsonObject(item.configJson);
+  const viewport = config.viewport;
+
+  if (!viewport || typeof viewport !== "object" || Array.isArray(viewport)) {
+    return undefined;
+  }
+
+  const record = viewport as Record<string, unknown>;
+  const width = numberFromUnknown(record.width);
+  const height = numberFromUnknown(record.height);
+
+  return width && height ? { width, height } : undefined;
+}
+
+function resolveBrowserExecutablePath(item: VerificationRunItem) {
+  const config = parseJsonObject(item.configJson);
+  return stringFromUnknown(config.browserExecutablePath) ?? undefined;
+}
+
+function resolveFullPage(item: VerificationRunItem) {
+  const config = parseJsonObject(item.configJson);
+  return config.fullPage === true;
+}
+
+function resolveVisualDiffThreshold(item: VerificationRunItem) {
+  const config = parseJsonObject(item.configJson);
+  return (
+    numberFromUnknown(config.threshold) ??
+    numberFromUnknown(config.diffThreshold) ??
+    numberFromUnknown(config.maxDiffRatio) ??
+    0.01
+  );
+}
+
+function resolvePixelmatchThreshold(item: VerificationRunItem) {
+  const config = parseJsonObject(item.configJson);
+  return numberFromUnknown(config.pixelmatchThreshold) ?? 0.1;
+}
+
+function numberFromUnknown(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function getImageDiffRatio(result: ImageDiffResult) {
+  if ("diffPixels" in result) {
+    return result.totalPixels === 0 ? 0 : result.diffPixels / result.totalPixels;
+  }
+  if (result.reason === "size-mismatch") {
+    return 1;
+  }
+  return 1;
+}
+
+function buildBrowserArtifactDirectory(input: {
+  rootPath: string;
+  executionId: string;
+  orderIndex: number;
+  verificationItemId: string;
+  mode: string;
+}) {
+  return join(
+    input.rootPath,
+    ".artifacts",
+    "executions",
+    input.executionId,
+    "browser",
+    `${input.orderIndex}-${input.verificationItemId}-${normalizeVisualToken(input.mode) || "browser"}`,
+  );
+}
+
+function fileSha256OrNull(path: string) {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
 }
 
 async function resolveVisualSourceAsset(

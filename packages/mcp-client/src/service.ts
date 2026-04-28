@@ -273,7 +273,7 @@ export function createMcpService(options: { prisma: PrismaClient }) {
           status: "running",
         });
 
-        const result = executeMcpWrapper({
+        const result = await executeMcpWrapper({
           serverName: call.serverName,
           toolName: call.toolName,
           mutability: call.mutability,

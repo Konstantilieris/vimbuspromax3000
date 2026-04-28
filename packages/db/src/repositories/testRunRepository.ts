@@ -19,6 +19,7 @@ export type CreateTestRunInput = {
   exitCode?: number | null;
   stdoutPath?: string | null;
   stderrPath?: string | null;
+  evidenceJson?: string | null;
   startedAt?: Date | null;
   finishedAt?: Date | null;
   /**
@@ -42,6 +43,7 @@ export type UpdateTestRunInput = {
   exitCode?: number | null;
   stdoutPath?: string | null;
   stderrPath?: string | null;
+  evidenceJson?: string | null;
   startedAt?: Date | null;
   finishedAt?: Date | null;
 };
@@ -56,6 +58,7 @@ export async function createTestRun(db: DatabaseClient, input: CreateTestRunInpu
       exitCode: input.exitCode ?? null,
       stdoutPath: input.stdoutPath ?? null,
       stderrPath: input.stderrPath ?? null,
+      evidenceJson: input.evidenceJson ?? null,
       startedAt: input.startedAt ?? null,
       finishedAt: input.finishedAt ?? null,
       iterationIndex: input.iterationIndex ?? 1,
@@ -97,6 +100,7 @@ export async function updateTestRun(db: DatabaseClient, id: string, input: Updat
       exitCode: input.exitCode,
       stdoutPath: input.stdoutPath,
       stderrPath: input.stderrPath,
+      evidenceJson: input.evidenceJson,
       startedAt: input.startedAt,
       finishedAt: input.finishedAt,
     },

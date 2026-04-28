@@ -279,6 +279,7 @@ model TestRun {
   exitCode           Int?
   stdoutPath         String?
   stderrPath         String?
+  evidenceJson       String?
   iterationIndex     Int       @default(1)
   phase              String    @default("post_green")
   startedAt          DateTime?

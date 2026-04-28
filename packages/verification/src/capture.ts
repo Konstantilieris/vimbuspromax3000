@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import type { AxeResults, RunOptions as AxeRunOptions } from "axe-core";
 
 export class BrowserNotInstalledError extends Error {
   override readonly name = "BrowserNotInstalledError";
@@ -27,9 +28,101 @@ export type CaptureScreenshotResult = {
   bytes: number;
 };
 
+export type BrowserNavigationResult = {
+  url: string;
+  title: string;
+  status: number | null;
+};
+
+export type RunAxeInput = {
+  url: string;
+  viewport?: ViewportSize;
+  browserExecutablePath?: string;
+  axeOptions?: AxeRunOptions;
+};
+
+export type RunAxeResult = {
+  url: string;
+  violations: AxeResults["violations"];
+  violationCount: number;
+};
+
+export async function navigateBrowser(input: {
+  url: string;
+  viewport?: ViewportSize;
+  browserExecutablePath?: string;
+}): Promise<BrowserNavigationResult> {
+  return withChromiumPage(input, async (page) => {
+    const response = await page.goto(input.url, { waitUntil: "load" });
+
+    return {
+      url: page.url(),
+      title: await page.title(),
+      status: response?.status() ?? null,
+    };
+  });
+}
+
 export async function captureScreenshot(input: CaptureScreenshotInput): Promise<CaptureScreenshotResult> {
   const viewport = input.viewport ?? { width: 1280, height: 720 };
   const fullPage = input.fullPage ?? false;
+
+  await withChromiumPage(
+    {
+      url: input.url,
+      viewport,
+      browserExecutablePath: input.browserExecutablePath,
+    },
+    async (page) => {
+      await page.goto(input.url, { waitUntil: "load" });
+      await page.screenshot({ path: input.outputPath, fullPage });
+    },
+  );
+
+  const fileStat = await stat(input.outputPath);
+
+  return {
+    path: input.outputPath,
+    viewport,
+    bytes: fileStat.size,
+  };
+}
+
+export async function runAxe(input: RunAxeInput): Promise<RunAxeResult> {
+  return withChromiumPage(input, async (page) => {
+    await page.goto(input.url, { waitUntil: "load" });
+    const axe = await import("axe-core");
+    const source = axe.source;
+
+    await page.addScriptTag({ content: source });
+    const result = await page.evaluate(
+      async (options) => {
+        const axeRuntime = (globalThis as unknown as { axe?: { run: (options?: unknown) => Promise<AxeResults> } }).axe;
+        if (!axeRuntime) {
+          throw new Error("axe-core did not load in the browser page.");
+        }
+        return axeRuntime.run(options);
+      },
+      input.axeOptions ?? {},
+    );
+
+    return {
+      url: page.url(),
+      violations: result.violations,
+      violationCount: result.violations.length,
+    };
+  });
+}
+
+type PlaywrightPage = Awaited<
+  ReturnType<Awaited<ReturnType<typeof import("playwright-core")["chromium"]["launch"]>>["newPage"]>
+>;
+
+async function withChromiumPage<T>(
+  input: { url: string; viewport?: ViewportSize; browserExecutablePath?: string },
+  callback: (page: PlaywrightPage) => Promise<T>,
+): Promise<T> {
+  const viewport = input.viewport ?? { width: 1280, height: 720 };
 
   // Lazy-load so importing this module does not require Playwright browsers to be installed.
   const { chromium } = await import("playwright-core");
@@ -52,8 +145,7 @@ export async function captureScreenshot(input: CaptureScreenshotInput): Promise<
   try {
     context = await browser.newContext({ viewport });
     const page = await context.newPage();
-    await page.goto(input.url, { waitUntil: "load" });
-    await page.screenshot({ path: input.outputPath, fullPage });
+    return await callback(page);
   } finally {
     try {
       await context?.close();
@@ -61,14 +153,6 @@ export async function captureScreenshot(input: CaptureScreenshotInput): Promise<
       await browser.close();
     }
   }
-
-  const fileStat = await stat(input.outputPath);
-
-  return {
-    path: input.outputPath,
-    viewport,
-    bytes: fileStat.size,
-  };
 }
 
 function isBrowserMissingError(error: unknown): boolean {

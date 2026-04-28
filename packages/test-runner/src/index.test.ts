@@ -10,6 +10,7 @@ import {
   approveSourceAsset,
   createSourceAsset,
   listTasks,
+  listTestRuns,
   listVisualVerificationResults,
   persistPlannerProposal,
   updateVerificationItemExpectedAsset,
@@ -425,6 +426,103 @@ describe("test runner service", () => {
     expect(testRuns[0]?.status).toBe("passed");
     expect(testRuns[0]?.verificationItem?.kind).toBe("visual");
   });
+
+  test("runs a11y items through the browser runner and stores axe evidence on the test run", async () => {
+    const env = {
+      VIMBUS_TEST_KEY: "present",
+    };
+    const browserRunner = createStubBrowserRunner(tempDir, {
+      axeViolations: [
+        {
+          id: "image-alt",
+          impact: "serious",
+          description: "Images must have alternate text.",
+        },
+      ],
+    });
+    const { project, task } = await seedReadyTask(prisma, tempDir, {
+      items: [
+        {
+          kind: "a11y",
+          runner: "axe",
+          title: "home accessibility",
+          description: "runs axe against the page",
+          command: null,
+          route: "data:text/html,<img src='x.png'>",
+        },
+      ],
+    });
+    const { execution, testRunnerService } = await startExecutionForTask(prisma, project.id, task.id, env, {
+      browserRunner,
+    });
+
+    const testRuns = await testRunnerService.runExecutionVerification({
+      executionId: execution.id,
+    });
+    const storedRuns = await listTestRuns(prisma, {
+      taskExecutionId: execution.id,
+    });
+
+    expect(testRuns).toHaveLength(1);
+    expect(testRuns[0]?.status).toBe("failed");
+    expect(storedRuns[0]?.evidenceJson).toContain("image-alt");
+    expect(browserRunner.runAxe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: "data:text/html,<img src='x.png'>",
+      }),
+    );
+  });
+
+  test("runs browser visual items with a target URL as screenshot diff checks", async () => {
+    const env = {
+      VIMBUS_TEST_KEY: "present",
+    };
+    const browserRunner = createStubBrowserRunner(tempDir);
+    const { project, task } = await seedReadyTask(prisma, tempDir, {
+      items: [
+        {
+          kind: "visual",
+          runner: "playwright",
+          title: "home screenshot",
+          description: "captures and diffs a page",
+          command: null,
+          route: "data:text/html,<main>ok</main>",
+          config: {
+            threshold: 0.05,
+          },
+        },
+      ],
+    });
+    const item = await getOnlyVerificationItem(prisma, task.id);
+    await attachApprovedSourceAsset(prisma, {
+      projectId: project.id,
+      taskId: task.id,
+      verificationItemId: item.id,
+      kind: "image",
+      relativePath: "docs/assets/home.png",
+      mimeType: "image/png",
+    });
+    const { execution, testRunnerService } = await startExecutionForTask(prisma, project.id, task.id, env, {
+      browserRunner,
+    });
+
+    const testRuns = await testRunnerService.runExecutionVerification({
+      executionId: execution.id,
+    });
+    const visualResults = await listVisualVerificationResults(prisma, {
+      taskExecutionId: execution.id,
+    });
+
+    expect(testRuns).toHaveLength(0);
+    expect(visualResults).toHaveLength(1);
+    expect(visualResults[0]?.status).toBe("passed");
+    expect(visualResults[0]?.mode).toBe("screenshot");
+    expect(visualResults[0]?.diffRatio).toBe(0);
+    expect(visualResults[0]?.threshold).toBe(0.05);
+    expect(browserRunner.navigate).toHaveBeenCalled();
+    expect(browserRunner.screenshot).toHaveBeenCalled();
+    expect(browserRunner.compareImages).toHaveBeenCalled();
+  });
 });
 
 type SeedVerificationItem = {
@@ -434,6 +532,8 @@ type SeedVerificationItem = {
   description: string;
   command?: string | null;
   orderIndex?: number;
+  route?: string | null;
+  config?: Record<string, unknown> | null;
 };
 
 async function seedReadyTask(
@@ -477,6 +577,8 @@ async function seedReadyTask(
                 description: item.description,
                 command: item.command ?? null,
                 orderIndex: item.orderIndex ?? index,
+                route: item.route ?? null,
+                config: item.config ?? undefined,
               })),
             },
           },
@@ -519,6 +621,7 @@ async function startExecutionForTask(
   env: Record<string, string>,
   options: {
     commandRunner?: Parameters<typeof createTestRunnerService>[0]["commandRunner"];
+    browserRunner?: Parameters<typeof createTestRunnerService>[0]["browserRunner"];
   } = {},
 ) {
   await setupModelRegistry(prisma, {
@@ -537,12 +640,47 @@ async function startExecutionForTask(
   const testRunnerService = createTestRunnerService({
     prisma,
     commandRunner: options.commandRunner,
+    browserRunner: options.browserRunner,
   });
   const execution = await executionService.startTaskExecution({ taskId });
 
   return {
     execution,
     testRunnerService,
+  };
+}
+
+function createStubBrowserRunner(
+  rootPath: string,
+  options: {
+    axeViolations?: Array<{ id: string; impact?: string; description?: string }>;
+  } = {},
+): NonNullable<Parameters<typeof createTestRunnerService>[0]["browserRunner"]> {
+  return {
+    navigate: vi.fn(async (input) => ({
+      url: input.url,
+      title: "Fixture",
+      status: 200,
+    })),
+    screenshot: vi.fn(async (input) => {
+      mkdirSync(join(rootPath, ".artifacts"), { recursive: true });
+      writeFileSync(input.outputPath, "fake-png", "utf8");
+      return {
+        path: input.outputPath,
+        viewport: input.viewport ?? { width: 1280, height: 720 },
+        bytes: 8,
+      };
+    }),
+    runAxe: vi.fn(async (input) => ({
+      url: input.url,
+      violations: options.axeViolations ?? [],
+      violationCount: options.axeViolations?.length ?? 0,
+    })),
+    compareImages: vi.fn(async () => ({
+      matched: true,
+      diffPixels: 0,
+      totalPixels: 100,
+    })),
   };
 }
 
