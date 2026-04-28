@@ -91,6 +91,10 @@ import {
 } from "@vimbuspromax3000/model-registry";
 import {
   createPlannerService,
+  evaluateInterviewSubmission,
+  getExpectedNextInterviewRound,
+  INTERVIEW_ROUNDS,
+  normalizeInterviewPayload,
   normalizePlannerProposalInput,
   type PlannerService,
 } from "@vimbuspromax3000/planner";
@@ -261,14 +265,82 @@ export function createApp(options: ApiAppOptions = {}) {
   });
 
   app.post("/planner/runs/:id/answers", async (context) => {
+    // VIM-34 — 5-round interview state machine. The planner service exposes a
+    // pure evaluator (`evaluateInterviewSubmission`) that decides accept vs
+    // out-of-order based on which round names are already persisted on
+    // `interviewJson`. Out-of-order submissions return 422 + the expected next
+    // round so the CLI can re-prompt; on accept, we emit `planner.question`
+    // followed by `planner.answer` for each round, in order.
+    const plannerRunId = context.req.param("id");
     const body = await context.req.json();
-    const answers = requireRecord(body.answers ?? body, "answers");
-    const plannerRun = await updatePlannerInterview(prisma, {
-      plannerRunId: context.req.param("id"),
-      answers,
+
+    const existing = await getPlannerRunDetail(prisma, plannerRunId);
+    if (!existing) {
+      return context.json({ error: "Planner run was not found." }, 404);
+    }
+
+    const currentInterview = (existing.interview ?? {}) as Record<string, unknown>;
+    const expectedNextBefore = getExpectedNextInterviewRound(currentInterview);
+    const submission = normalizeInterviewPayload(body, {
+      expectedNextRound: expectedNextBefore,
     });
 
-    return context.json(plannerRun);
+    if (!submission) {
+      return context.json(
+        {
+          error: "invalid_payload",
+          expectedNextRound: expectedNextBefore,
+          rounds: INTERVIEW_ROUNDS,
+        },
+        422,
+      );
+    }
+
+    const decision = evaluateInterviewSubmission(currentInterview, submission);
+    if (!decision.ok) {
+      return context.json(
+        {
+          error: decision.reason,
+          expectedNextRound: decision.expectedNextRound,
+          submittedRound: decision.submittedRound,
+        },
+        422,
+      );
+    }
+
+    // Apply each accepted round one at a time so persistence + events are
+    // observably ordered: planner.question (round opened) → planner.answer
+    // (round persisted). `updatePlannerInterview` does the merge + answer
+    // event in a single repo call; we layer the question event in front.
+    let plannerRun: Awaited<ReturnType<typeof updatePlannerInterview>> | null = null;
+    for (const entry of decision.appliedRounds) {
+      await appendLoopEvent(prisma, {
+        projectId: existing.projectId,
+        type: "planner.question",
+        payload: {
+          plannerRunId,
+          round: entry.round,
+        },
+      });
+      plannerRun = await updatePlannerInterview(prisma, {
+        plannerRunId,
+        answers: { [entry.round]: entry.answer },
+      });
+    }
+
+    if (!plannerRun) {
+      // Should be unreachable — evaluateInterviewSubmission rejects an empty
+      // submission before we get here. Defensive guard for type narrowing.
+      return context.json({ error: "missing_answer", expectedNextRound: expectedNextBefore }, 422);
+    }
+
+    // Re-read so the response includes the planner-run detail shape (project,
+    // proposalSummary, approvals) the CLI/dashboard already render.
+    const updated = await getPlannerRunDetail(prisma, plannerRunId);
+    return context.json({
+      ...(updated ?? plannerRun),
+      expectedNextRound: decision.expectedNextRound,
+    });
   });
 
   app.post("/planner/runs/:id/generate", async (context) => {

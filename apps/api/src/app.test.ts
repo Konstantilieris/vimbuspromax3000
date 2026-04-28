@@ -182,15 +182,22 @@ describe("planner/task/approval API", () => {
     expect(plannerRunRef.status).toBe(201);
     const plannerRun = await plannerRunRef.json();
 
+    // VIM-34 — interview is now a strict-ordered 5-round conversation. The
+    // batch payload is still accepted as long as the keys arrive in canonical
+    // order from the next-expected round.
     const answerRef = await postJson(api, `/planner/runs/${plannerRun.id}/answers`, {
       answers: {
         scope: { in: ["api", "db"], out: ["cli"] },
+        domain: { models: ["task", "epic"] },
+        interfaces: { http: true },
         verification: { required: ["logic"] },
+        policy: { license: "MIT" },
       },
     });
     expect(answerRef.status).toBe(200);
     const answeredPlannerRun = await answerRef.json();
     expect(answeredPlannerRun.interview.scope.in).toEqual(["api", "db"]);
+    expect(answeredPlannerRun.expectedNextRound).toBeNull();
 
     const generateRef = await postJson(api, `/planner/runs/${plannerRun.id}/generate`, {
       summary: "Persist proposal payload",
@@ -305,7 +312,10 @@ describe("planner/task/approval API", () => {
     await postJson(api, `/planner/runs/${plannerRun.id}/answers`, {
       answers: {
         scope: { in: ["packages/planner", "apps/api", "apps/cli"] },
+        domain: { models: ["plannerRun", "task"] },
+        interfaces: { http: true },
         verification: { required: ["logic", "integration"] },
+        policy: { license: "MIT" },
       },
     });
 
@@ -604,7 +614,10 @@ describe("execution API", () => {
     const answerRef = await postJson(api, `/planner/runs/${plannerRun.id}/answers`, {
       answers: {
         scope: { in: ["apps/api", "packages/agent", "packages/test-runner"] },
+        domain: { models: ["task"] },
+        interfaces: { http: true },
         verification: { required: ["command-backed smoke"] },
+        policy: { license: "MIT" },
       },
     });
     expect(answerRef.status).toBe(200);

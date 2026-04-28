@@ -1,4 +1,6 @@
 import { basename } from "node:path";
+import { createInterface } from "node:readline/promises";
+import { stdin as defaultStdin, stdout as defaultStdout } from "node:process";
 import { PRODUCT_NAME } from "@vimbuspromax3000/shared";
 
 export const PLANNER_COMMANDS = [
@@ -7,15 +9,36 @@ export const PLANNER_COMMANDS = [
   "/plan",
   "/plan:show",
   "/plan:answer",
+  "/plan:interview",
   "/plan:generate",
   "/approve:plan",
   "/tasks",
   "/approvals",
 ] as const;
 
+/**
+ * VIM-34 — fixed 5-round interview order. Mirrored from
+ * `INTERVIEW_ROUNDS` in @vimbuspromax3000/planner. Hard-coded here so the CLI
+ * does not need a workspace dependency on the planner package just to display
+ * the round name in prompts.
+ */
+export const PLANNER_INTERVIEW_ROUNDS = [
+  "scope",
+  "domain",
+  "interfaces",
+  "verification",
+  "policy",
+] as const;
+
+export type PlannerInterviewRound = (typeof PLANNER_INTERVIEW_ROUNDS)[number];
+
+export type PlannerPromptFn = (prompt: string) => Promise<string>;
+
 export type PlannerCommandOptions = {
   env?: Record<string, string | undefined>;
   fetch?: typeof fetch;
+  /** Test/headless override for the per-round operator prompt. */
+  prompt?: PlannerPromptFn;
 };
 
 type ParsedOptions = Record<string, string | undefined>;
@@ -94,6 +117,8 @@ export async function runPlannerCommand(
       return runShowPlannerRun(apiUrl, parsed, request);
     case "/plan:answer":
       return runAnswerPlannerRun(apiUrl, parsed, request);
+    case "/plan:interview":
+      return runInterviewPlannerRun(apiUrl, parsed, request, options.prompt);
     case "/plan:generate":
       return runGeneratePlannerRun(apiUrl, parsed, request);
     case "/approve:plan":
@@ -242,6 +267,127 @@ async function runAnswerPlannerRun(apiUrl: string, options: ParsedOptions, reque
   return getPlannerRunViewSnapshot(plannerRun);
 }
 
+/**
+ * VIM-34 — walk the operator through the 5-round interview, one round at a
+ * time. After every round we POST the single-round payload to the API which
+ * either accepts it (200) and tells us the next expected round, or rejects it
+ * with 422 + the expected next round so we re-prompt for the right one.
+ *
+ * In test/headless contexts the caller can supply `--prompt-json` (a JSON
+ * object keyed by round name) or override `options.prompt` directly.
+ */
+async function runInterviewPlannerRun(
+  apiUrl: string,
+  options: ParsedOptions,
+  request: typeof fetch,
+  promptOverride?: PlannerPromptFn,
+): Promise<string> {
+  const plannerRunId = requireOption(options, "planner-run-id");
+  const url = `${apiUrl}/planner/runs/${encodeURIComponent(plannerRunId)}/answers`;
+
+  // Optional --prompt-json gives non-interactive callers a deterministic way
+  // to feed answers per round. Tests use this to assert the round walk.
+  const promptedAnswers = options["prompt-json"]
+    ? parseAnswersJson(options["prompt-json"])
+    : undefined;
+  const ask = promptOverride ?? createDefaultPlannerPrompt();
+
+  const lines: string[] = [`${PRODUCT_NAME} planner interview`];
+  let plannerRun: ApiPlannerRun | undefined;
+
+  // Drive the round loop off the server's reported `expectedNextRound`. We
+  // start at the canonical first round; after each accepted round the API
+  // tells us what's next (or null when complete).
+  let nextRound: PlannerInterviewRound | null = PLANNER_INTERVIEW_ROUNDS[0];
+
+  while (nextRound) {
+    const round: PlannerInterviewRound = nextRound;
+    lines.push(`Round: ${round}`);
+
+    const answer = await collectInterviewAnswer(round, ask, promptedAnswers);
+
+    let response: InterviewSubmissionResponse;
+    try {
+      response = await requestJson<InterviewSubmissionResponse>(request, url, {
+        method: "POST",
+        body: { round, answer },
+      });
+    } catch (error) {
+      // The API surfaces 422 with `expectedNextRound` for out-of-order. We
+      // re-prompt at the round the API expected and retry the loop without
+      // crashing so the operator can recover.
+      const recovered = parseOutOfOrderError(error);
+      if (recovered) {
+        lines.push(`Out of order: server expected ${recovered.expectedNextRound ?? "(complete)"}.`);
+        nextRound = recovered.expectedNextRound;
+        continue;
+      }
+      throw error;
+    }
+
+    plannerRun = response;
+    nextRound = response.expectedNextRound ?? null;
+    lines.push(`Accepted: ${round}.`);
+  }
+
+  if (plannerRun) {
+    lines.push(getPlannerRunViewSnapshot(plannerRun));
+  }
+  return lines.join("\n");
+}
+
+type InterviewSubmissionResponse = ApiPlannerRun & {
+  expectedNextRound: PlannerInterviewRound | null;
+};
+
+async function collectInterviewAnswer(
+  round: PlannerInterviewRound,
+  ask: PlannerPromptFn,
+  prefilled: Record<string, unknown> | undefined,
+): Promise<Record<string, unknown>> {
+  if (prefilled && Object.prototype.hasOwnProperty.call(prefilled, round)) {
+    const value = prefilled[round];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    throw new Error(`--prompt-json[${round}] must be an object.`);
+  }
+
+  const reply = await ask(`[${round}] answer (JSON object): `);
+  return parseAnswersJson(reply);
+}
+
+function parseOutOfOrderError(
+  error: unknown,
+): { expectedNextRound: PlannerInterviewRound | null } | null {
+  if (!(error instanceof Error)) return null;
+  // requestJson encodes API errors as `API <status>: <message>` and stuffs
+  // the response payload into `cause` so we can read `expectedNextRound`.
+  const cause = (error as { cause?: unknown }).cause;
+  if (!cause || typeof cause !== "object") return null;
+  const payload = cause as { error?: unknown; expectedNextRound?: unknown };
+  if (payload.error !== "out_of_order") return null;
+  if (payload.expectedNextRound === null) {
+    return { expectedNextRound: null };
+  }
+  if (typeof payload.expectedNextRound === "string"
+    && (PLANNER_INTERVIEW_ROUNDS as readonly string[]).includes(payload.expectedNextRound)) {
+    return { expectedNextRound: payload.expectedNextRound as PlannerInterviewRound };
+  }
+  return null;
+}
+
+function createDefaultPlannerPrompt(): PlannerPromptFn {
+  return async (prompt) => {
+    const rl = createInterface({ input: defaultStdin, output: defaultStdout });
+    try {
+      return await rl.question(prompt);
+    } finally {
+      rl.close();
+    }
+  };
+}
+
 async function runGeneratePlannerRun(apiUrl: string, options: ParsedOptions, request: typeof fetch) {
   const plannerRun = await requestJson<ApiPlannerRun>(
     request,
@@ -327,7 +473,10 @@ async function requestJson<T>(
 
   if (!response.ok) {
     const message = isObject(payload) && typeof payload.error === "string" ? payload.error : response.statusText;
-    throw new Error(`API ${response.status}: ${message}`);
+    // Attach the parsed payload as `cause` so structured handlers (e.g. the
+    // VIM-34 out-of-order recovery in the interview command) can introspect
+    // `expectedNextRound` without re-parsing the message.
+    throw new Error(`API ${response.status}: ${message}`, { cause: payload });
   }
 
   return payload as T;
