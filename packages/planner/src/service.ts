@@ -23,6 +23,201 @@ export const DEFAULT_PLANNER_GENERATION_SEED = 7;
 
 export type PlannerRunDetail = NonNullable<Awaited<ReturnType<typeof getPlannerRunDetail>>>;
 
+/**
+ * VIM-34 — fixed 5-round interview order. The operator answers one round at a
+ * time; the API rejects out-of-order submissions with 422 + the expected next
+ * round name. Each round persists its own slice of `interviewJson` keyed by
+ * round name, e.g. `interviewJson.scope`, `interviewJson.domain`.
+ */
+export const INTERVIEW_ROUNDS = [
+  "scope",
+  "domain",
+  "interfaces",
+  "verification",
+  "policy",
+] as const;
+
+export type InterviewRound = (typeof INTERVIEW_ROUNDS)[number];
+
+export function isInterviewRound(value: unknown): value is InterviewRound {
+  return typeof value === "string" && (INTERVIEW_ROUNDS as readonly string[]).includes(value);
+}
+
+/**
+ * Returns the next round name the operator is expected to submit, given the
+ * rounds already persisted on `interview`. Returns `null` once all 5 rounds
+ * are present (interview complete).
+ */
+export function getExpectedNextInterviewRound(
+  interview: Record<string, unknown> | null | undefined,
+): InterviewRound | null {
+  const seen = interview ?? {};
+  for (const round of INTERVIEW_ROUNDS) {
+    if (!Object.prototype.hasOwnProperty.call(seen, round)) {
+      return round;
+    }
+  }
+  return null;
+}
+
+export type InterviewSubmission =
+  | { round: InterviewRound; answer: Record<string, unknown> }
+  | { rounds: Array<{ round: InterviewRound; answer: Record<string, unknown> }> };
+
+export type InterviewSubmissionAcceptance = {
+  ok: true;
+  /** Rounds that were applied by this submission, in the order they were applied. */
+  appliedRounds: Array<{ round: InterviewRound; answer: Record<string, unknown> }>;
+  /** Interview JSON after merging all applied rounds. */
+  mergedInterview: Record<string, unknown>;
+  /** The next expected round after this submission, or `null` if interview is complete. */
+  expectedNextRound: InterviewRound | null;
+};
+
+export type InterviewSubmissionRejection = {
+  ok: false;
+  reason: "out_of_order" | "invalid_round" | "missing_answer";
+  /** The round name we expected (or `null` if interview is already complete). */
+  expectedNextRound: InterviewRound | null;
+  /** The round the operator tried to submit, if any. */
+  submittedRound?: string;
+};
+
+export type InterviewSubmissionResult =
+  | InterviewSubmissionAcceptance
+  | InterviewSubmissionRejection;
+
+/**
+ * VIM-34 — pure round-state-machine evaluator. Given the current interview
+ * slice (already persisted) and a normalized submission (single round or a
+ * batch of rounds), decide whether to accept or reject the submission with a
+ * single explicit branch. Out-of-order is the only rejection branch — the
+ * caller is responsible for parsing the wire payload into a `submission`
+ * before invoking this.
+ */
+export function evaluateInterviewSubmission(
+  currentInterview: Record<string, unknown> | null | undefined,
+  submission: InterviewSubmission,
+): InterviewSubmissionResult {
+  const baseInterview: Record<string, unknown> = { ...(currentInterview ?? {}) };
+  const incoming = "rounds" in submission ? submission.rounds : [submission];
+
+  if (incoming.length === 0) {
+    return {
+      ok: false,
+      reason: "missing_answer",
+      expectedNextRound: getExpectedNextInterviewRound(baseInterview),
+    };
+  }
+
+  const applied: Array<{ round: InterviewRound; answer: Record<string, unknown> }> = [];
+  const merged = baseInterview;
+
+  for (const entry of incoming) {
+    if (!isInterviewRound(entry.round)) {
+      return {
+        ok: false,
+        reason: "invalid_round",
+        expectedNextRound: getExpectedNextInterviewRound(merged),
+        submittedRound: String(entry.round),
+      };
+    }
+
+    const expected = getExpectedNextInterviewRound(merged);
+    if (expected !== entry.round) {
+      // Out-of-order: the only rejection branch we care about for the 422
+      // contract. Surfaces the round we expected next so the CLI can re-prompt.
+      return {
+        ok: false,
+        reason: "out_of_order",
+        expectedNextRound: expected,
+        submittedRound: entry.round,
+      };
+    }
+
+    merged[entry.round] = entry.answer;
+    applied.push({ round: entry.round, answer: entry.answer });
+  }
+
+  return {
+    ok: true,
+    appliedRounds: applied,
+    mergedInterview: merged,
+    expectedNextRound: getExpectedNextInterviewRound(merged),
+  };
+}
+
+/**
+ * VIM-34 — normalize a wire payload into a strict `InterviewSubmission`.
+ * Accepts three shapes:
+ *   1. `{ round: "scope", answer: {...} }`           — explicit single-round
+ *   2. `{ answer: {...} }`                            — single round (round is
+ *       the next expected); `expectedNextRound` must be supplied by caller
+ *   3. `{ answers: { scope: {...}, domain: {...} } }` — legacy batch; rounds
+ *       are inferred from the keys, in `INTERVIEW_ROUNDS` order, so an
+ *       in-order batch still works for the existing happy-path tests
+ * Returns `null` if the payload cannot be normalized to a submission shape.
+ */
+export function normalizeInterviewPayload(
+  payload: unknown,
+  options: { expectedNextRound: InterviewRound | null },
+): InterviewSubmission | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+
+  const body = payload as Record<string, unknown>;
+
+  // Shape 1: explicit single-round
+  if (typeof body.round === "string" && body.answer !== undefined) {
+    if (!isPlainRecord(body.answer)) return null;
+    return { round: body.round as InterviewRound, answer: body.answer };
+  }
+
+  // Shape 2: implicit single-round — answer with no round means "the next one"
+  if (body.answer !== undefined && body.round === undefined) {
+    if (!options.expectedNextRound) return null;
+    if (!isPlainRecord(body.answer)) return null;
+    return { round: options.expectedNextRound, answer: body.answer };
+  }
+
+  // Shape 3: legacy batch — `answers` is a record keyed by round name
+  if (isPlainRecord(body.answers)) {
+    return normalizeBatchAnswers(body.answers);
+  }
+
+  // Bare batch — payload itself is the answers map (no `answers` wrapper)
+  return normalizeBatchAnswers(body);
+}
+
+function normalizeBatchAnswers(record: Record<string, unknown>): InterviewSubmission | null {
+  // Pull the rounds out in canonical order so a `{verification, scope}` batch
+  // is treated as `{scope, verification}` — the state machine still rejects
+  // skipped rounds, so this only helps when keys arrive in jumbled order but
+  // are otherwise contiguous from the next expected round.
+  const rounds: Array<{ round: InterviewRound; answer: Record<string, unknown> }> = [];
+  for (const round of INTERVIEW_ROUNDS) {
+    if (!Object.prototype.hasOwnProperty.call(record, round)) continue;
+    const answer = record[round];
+    if (!isPlainRecord(answer)) return null;
+    rounds.push({ round, answer });
+  }
+
+  // Reject the batch if the operator passed unknown keys — protects against a
+  // typo silently being ignored.
+  for (const key of Object.keys(record)) {
+    if (!isInterviewRound(key)) return null;
+  }
+
+  if (rounds.length === 0) return null;
+  if (rounds.length === 1) return rounds[0]!;
+  return { rounds };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 export type PlannerGenerator = (input: {
   model: unknown;
   system: string;

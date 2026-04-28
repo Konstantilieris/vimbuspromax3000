@@ -10,6 +10,10 @@ import { setupModelRegistry } from "@vimbuspromax3000/model-registry";
 import {
   annotateProposalComplexity,
   createPlannerService,
+  evaluateInterviewSubmission,
+  getExpectedNextInterviewRound,
+  INTERVIEW_ROUNDS,
+  normalizeInterviewPayload,
 } from "./service";
 import type { PlannerProposalInput } from "@vimbuspromax3000/db";
 
@@ -350,4 +354,165 @@ describe("createPlannerService.generateAndPersist", () => {
     expect(returnedTasks.find((task) => task.stableId.endsWith("TASK-TINY"))?.complexity).toBe("low");
     expect(returnedTasks.find((task) => task.stableId.endsWith("TASK-BROAD"))?.complexity).toBe("high");
   }, 30000);
+});
+
+describe("VIM-34 interview round state machine", () => {
+  test("INTERVIEW_ROUNDS lists the five rounds in the spec'd order", () => {
+    expect(INTERVIEW_ROUNDS).toEqual([
+      "scope",
+      "domain",
+      "interfaces",
+      "verification",
+      "policy",
+    ]);
+  });
+
+  test("getExpectedNextInterviewRound returns 'scope' for an empty interview", () => {
+    expect(getExpectedNextInterviewRound({})).toBe("scope");
+    expect(getExpectedNextInterviewRound(null)).toBe("scope");
+    expect(getExpectedNextInterviewRound(undefined)).toBe("scope");
+  });
+
+  test("getExpectedNextInterviewRound walks the rounds in order", () => {
+    expect(getExpectedNextInterviewRound({ scope: {} })).toBe("domain");
+    expect(getExpectedNextInterviewRound({ scope: {}, domain: {} })).toBe("interfaces");
+    expect(getExpectedNextInterviewRound({ scope: {}, domain: {}, interfaces: {} })).toBe(
+      "verification",
+    );
+    expect(
+      getExpectedNextInterviewRound({ scope: {}, domain: {}, interfaces: {}, verification: {} }),
+    ).toBe("policy");
+  });
+
+  test("getExpectedNextInterviewRound returns null when all five are present", () => {
+    expect(
+      getExpectedNextInterviewRound({
+        scope: {},
+        domain: {},
+        interfaces: {},
+        verification: {},
+        policy: {},
+      }),
+    ).toBeNull();
+  });
+
+  test("evaluateInterviewSubmission accepts the next-expected round and merges it", () => {
+    const result = evaluateInterviewSubmission(
+      {},
+      { round: "scope", answer: { in: ["api"], out: ["cli"] } },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.appliedRounds).toEqual([
+      { round: "scope", answer: { in: ["api"], out: ["cli"] } },
+    ]);
+    expect(result.mergedInterview).toEqual({ scope: { in: ["api"], out: ["cli"] } });
+    expect(result.expectedNextRound).toBe("domain");
+  });
+
+  test("evaluateInterviewSubmission returns 422-style rejection when domain submitted before scope", () => {
+    const result = evaluateInterviewSubmission(
+      {},
+      { round: "domain", answer: { models: ["task"] } },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("out_of_order");
+    expect(result.expectedNextRound).toBe("scope");
+    expect(result.submittedRound).toBe("domain");
+  });
+
+  test("evaluateInterviewSubmission returns null expectedNextRound when the final round is accepted", () => {
+    const result = evaluateInterviewSubmission(
+      {
+        scope: {},
+        domain: {},
+        interfaces: {},
+        verification: {},
+      },
+      { round: "policy", answer: { license: "MIT" } },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.expectedNextRound).toBeNull();
+  });
+
+  test("evaluateInterviewSubmission accepts a contiguous batch in one go", () => {
+    const result = evaluateInterviewSubmission(
+      { scope: { in: ["api"] } },
+      {
+        rounds: [
+          { round: "domain", answer: { models: ["task"] } },
+          { round: "interfaces", answer: { http: true } },
+        ],
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.appliedRounds.map((entry) => entry.round)).toEqual(["domain", "interfaces"]);
+    expect(result.expectedNextRound).toBe("verification");
+  });
+
+  test("evaluateInterviewSubmission rejects a batch that skips ahead", () => {
+    const result = evaluateInterviewSubmission(
+      {},
+      {
+        rounds: [
+          { round: "scope", answer: {} },
+          { round: "interfaces", answer: {} },
+        ],
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("out_of_order");
+    expect(result.expectedNextRound).toBe("domain");
+    expect(result.submittedRound).toBe("interfaces");
+  });
+
+  test("normalizeInterviewPayload handles explicit round+answer shape", () => {
+    const submission = normalizeInterviewPayload(
+      { round: "scope", answer: { in: ["api"] } },
+      { expectedNextRound: "scope" },
+    );
+
+    expect(submission).toEqual({ round: "scope", answer: { in: ["api"] } });
+  });
+
+  test("normalizeInterviewPayload infers round from expectedNextRound when omitted", () => {
+    const submission = normalizeInterviewPayload(
+      { answer: { in: ["api"] } },
+      { expectedNextRound: "scope" },
+    );
+
+    expect(submission).toEqual({ round: "scope", answer: { in: ["api"] } });
+  });
+
+  test("normalizeInterviewPayload handles legacy { answers: {scope, domain} } batch", () => {
+    const submission = normalizeInterviewPayload(
+      { answers: { scope: { in: ["api"] }, domain: { models: ["task"] } } },
+      { expectedNextRound: "scope" },
+    );
+
+    expect(submission).toEqual({
+      rounds: [
+        { round: "scope", answer: { in: ["api"] } },
+        { round: "domain", answer: { models: ["task"] } },
+      ],
+    });
+  });
+
+  test("normalizeInterviewPayload returns null on unknown keys in the batch", () => {
+    const submission = normalizeInterviewPayload(
+      { answers: { scope: { in: ["api"] }, mystery: { foo: 1 } } },
+      { expectedNextRound: "scope" },
+    );
+
+    expect(submission).toBeNull();
+  });
 });
