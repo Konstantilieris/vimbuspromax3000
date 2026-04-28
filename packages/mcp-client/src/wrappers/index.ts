@@ -1,5 +1,12 @@
 import type { McpMutability } from "@vimbuspromax3000/shared";
 import {
+  DB_LIST_TABLES_INPUT_SCHEMA,
+  DB_LIST_TABLES_TOOL_NAME,
+  DB_QUERY_INPUT_SCHEMA,
+  DB_QUERY_TOOL_NAME,
+  TASKGOBLIN_DB_SERVER_NAME,
+} from "./db";
+import {
   APPLY_PATCH_INPUT_SCHEMA,
   APPLY_PATCH_TOOL_NAME,
   TASKGOBLIN_PATCH_SERVER_NAME,
@@ -22,6 +29,29 @@ export type {
   ApplyPatchSuccess,
   PatchWrapper,
 } from "./patch";
+
+export {
+  assertSelectOnly,
+  createDbWrapper,
+  DB_LIST_TABLES_INPUT_SCHEMA,
+  DB_LIST_TABLES_TOOL_NAME,
+  DB_QUERY_INPUT_SCHEMA,
+  DB_QUERY_TOOL_NAME,
+  DbReadError,
+  TASKGOBLIN_DB_SERVER_NAME,
+} from "./db";
+
+export type {
+  DbListTablesFailure,
+  DbListTablesResult,
+  DbListTablesSuccess,
+  DbQueryFailure,
+  DbQueryInput,
+  DbQueryResult,
+  DbQuerySuccess,
+  DbReadErrorCode,
+  DbWrapper,
+} from "./db";
 
 export type WrapperToolDefinition = {
   name: string;
@@ -58,6 +88,32 @@ export const WRAPPER_SERVER_REGISTRY: WrapperServerDefinition[] = [
         mutability: "write",
         approvalRequired: true,
         inputSchema: APPLY_PATCH_INPUT_SCHEMA as unknown as Record<string, unknown>,
+      },
+    ],
+  },
+  {
+    name: TASKGOBLIN_DB_SERVER_NAME,
+    label: "TaskGoblin read-only database",
+    trustLevel: "trusted",
+    tools: [
+      {
+        name: DB_QUERY_TOOL_NAME,
+        description:
+          "Run a single read-only SELECT (or read-only WITH ... SELECT) against " +
+          "the project Prisma database. Mutating statements, multi-statement batches, " +
+          "and mutating CTEs are rejected with INVALID_ARGUMENTS.",
+        mutability: "read",
+        approvalRequired: false,
+        inputSchema: DB_QUERY_INPUT_SCHEMA as unknown as Record<string, unknown>,
+      },
+      {
+        name: DB_LIST_TABLES_TOOL_NAME,
+        description:
+          "List Prisma-managed table names in the project database. Excludes sqlite " +
+          "internal tables and Prisma migration metadata.",
+        mutability: "read",
+        approvalRequired: false,
+        inputSchema: DB_LIST_TABLES_INPUT_SCHEMA as unknown as Record<string, unknown>,
       },
     ],
   },

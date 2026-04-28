@@ -35,7 +35,7 @@ describe("MCP client execution wrappers", () => {
     removeTempDir(tempDir);
   }, SUITE_HOOK_TIMEOUT_MS);
 
-  test("catalog exposes only the minimal fs/git and shell wrapper tools", () => {
+  test("catalog exposes only the minimal fs/git, db, and shell wrapper tools", () => {
     expect(
       STANDARD_MCP_SERVERS.map((server) => ({
         name: server.name,
@@ -49,6 +49,10 @@ describe("MCP client execution wrappers", () => {
       {
         name: "taskgoblin-patch",
         tools: ["apply_patch"],
+      },
+      {
+        name: "taskgoblin-db",
+        tools: ["read.query", "read.list_tables"],
       },
       {
         name: "taskgoblin-shell",

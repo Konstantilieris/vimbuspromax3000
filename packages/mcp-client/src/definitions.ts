@@ -1,4 +1,11 @@
 import type { McpMutability } from "@vimbuspromax3000/shared";
+import {
+  DB_LIST_TABLES_INPUT_SCHEMA,
+  DB_LIST_TABLES_TOOL_NAME,
+  DB_QUERY_INPUT_SCHEMA,
+  DB_QUERY_TOOL_NAME,
+  TASKGOBLIN_DB_SERVER_NAME,
+} from "./wrappers/db";
 import { APPLY_PATCH_INPUT_SCHEMA, TASKGOBLIN_PATCH_SERVER_NAME } from "./wrappers/patch";
 
 type ToolDefinition = {
@@ -100,6 +107,34 @@ export const STANDARD_MCP_SERVERS: ServerDefinition[] = [
         mutability: "write",
         approvalRequired: true,
         inputSchemaJson: JSON.stringify(APPLY_PATCH_INPUT_SCHEMA),
+      },
+    ],
+  },
+  {
+    name: TASKGOBLIN_DB_SERVER_NAME,
+    transport: "stdio",
+    trustLevel: "trusted",
+    tools: [
+      {
+        name: DB_QUERY_TOOL_NAME,
+        description:
+          "Run a single read-only SELECT (or read-only WITH ... SELECT) " +
+          "against the project Prisma database. Mutating statements, " +
+          "multi-statement batches, and mutating CTEs are rejected with " +
+          "INVALID_ARGUMENTS.",
+        mutability: "read",
+        approvalRequired: false,
+        inputSchemaJson: JSON.stringify(DB_QUERY_INPUT_SCHEMA),
+      },
+      {
+        name: DB_LIST_TABLES_TOOL_NAME,
+        description:
+          "List the live Prisma-managed table names in the project " +
+          "database. Excludes sqlite internal tables and Prisma migration " +
+          "metadata.",
+        mutability: "read",
+        approvalRequired: false,
+        inputSchemaJson: JSON.stringify(DB_LIST_TABLES_INPUT_SCHEMA),
       },
     ],
   },
