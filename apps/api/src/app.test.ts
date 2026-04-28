@@ -884,7 +884,7 @@ describe("execution API", () => {
     const abandonedBranch = await abandonBranchRef.json();
     expect(abandonedBranch.state).toBe("abandoned");
     expect(runCommand("git", ["branch", "--show-current"], tempDir).stdout.trim()).toBe("main");
-  }, 20000);
+  });
 
   test("starts execution through the API and persists the model snapshot", async () => {
     const api = createApp({
@@ -907,7 +907,7 @@ describe("execution API", () => {
     expect(execution.latestAgentStep.modelName).toBe("openai:gpt-test");
     expect(execution.policy.modelResolution.concreteModelName).toBe("openai:gpt-test");
     expect(runCommand("git", ["branch", "--show-current"], tempDir).stdout.trim()).toBe(execution.branch.name);
-  }, 20000);
+  });
 
   test("rejects a ready patch through the patch review API", async () => {
     const api = createApp({
@@ -954,7 +954,7 @@ describe("execution API", () => {
     );
     const events = await eventsRef.json();
     expect(events.map((event: { type: string }) => event.type)).toContain("task.failed");
-  }, 20000);
+  });
 
   test("marks the task execution failed when verification command execution fails", async () => {
     const api = createApp({
@@ -987,7 +987,7 @@ describe("execution API", () => {
 
     const patchRef = await api.fetch(new Request(`http://localhost/executions/${execution.id}/patch`));
     expect(patchRef.status).toBe(404);
-  }, 20000);
+  });
 
   test("dispatches approved visual items without commands to visual verification", async () => {
     const api = createApp({
