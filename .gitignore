@@ -14,6 +14,7 @@ coverage/
 *.sqlite3
 packages/db/src/generated/
 packages/db/prisma/*.db
+packages/db/prisma/.generated/
 .claude/agent-memory/project-manager/jira-config.md
 .claude/agent-memory/project-manager/team-defaults.md
 .claude/agent-memory/project-manager/slack-config.md
