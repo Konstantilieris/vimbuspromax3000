@@ -1,14 +1,32 @@
 # API Notes
 
+## Local Postgres for tests and smokes
+
+The canonical local Postgres for both `bun run test:postgres` and the manual
+two-process smoke below is the `postgres` service in the repo-root
+`docker-compose.yml`. It binds `127.0.0.1:55432` and seeds the
+`taskgoblin/taskgoblin/taskgoblin` user / password / database.
+
+```bash
+docker compose up -d --wait postgres
+export DATABASE_URL="postgres://taskgoblin:taskgoblin@127.0.0.1:55432/taskgoblin?schema=public"
+docker compose down   # when you're finished
+```
+
+`bun run test:postgres` brings the service up, pushes the schema, runs the
+smoke, and tears the service down on its own. The two-process smoke below
+expects you to leave the service running while the API processes are up.
+
 ## Manual two-process LoopEventBus smoke
 
 Use this when changing `VIMBUS_LOOP_BUS` wiring or the Postgres bus adapter.
 
-1. Install dependencies and point the API at a Postgres database:
+1. Install dependencies and point the API at the local docker-compose Postgres:
 
    ```bash
    bun install
-   export DATABASE_URL="postgres://user:password@localhost:5432/vimbus"
+   docker compose up -d --wait postgres
+   export DATABASE_URL="postgres://taskgoblin:taskgoblin@127.0.0.1:55432/taskgoblin?schema=public"
    export VIMBUS_LOOP_BUS=postgres
    ```
 

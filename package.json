@@ -17,6 +17,10 @@
     "db:push:postgres": "bun --filter @vimbuspromax3000/db db:push:postgres",
     "test:vitest": "vitest run",
     "test:vitest:postgres": "bun --filter @vimbuspromax3000/db test:vitest:postgres",
+    "test:unit": "vitest run",
+    "test:serial": "vitest run --no-file-parallelism",
+    "test:postgres": "bun scripts/test-postgres.ts",
+    "verify:m2": "bun run typecheck && bun run test:unit && bun run test:serial && bun run test:postgres",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

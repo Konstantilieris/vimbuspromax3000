@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: taskgoblin-postgres
+    environment:
+      POSTGRES_USER: taskgoblin
+      POSTGRES_PASSWORD: taskgoblin
+      POSTGRES_DB: taskgoblin
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskgoblin -d taskgoblin"]
+      interval: 1s
+      timeout: 5s
+      retries: 30

@@ -1,16 +1,52 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createPrismaClient, type PrismaClient } from "./client";
 
-export async function createIsolatedPrisma(prefix = "vimbus-db-") {
-  const tempDir = mkdtempSync(join(tmpdir(), prefix));
+// VIM-48: Per-worker memoized template DB. Without this, every `createIsolatedPrisma`
+// call re-applies the full migration set against a fresh SQLite file. Under vitest's
+// parallel pool that contended on file locks during PRAGMA / DDL execution and
+// occasionally tripped the 30s hookTimeout (root cause of both flakes named in the
+// Sprint 7 plan: test-runner parallel-pool flake and packages/db beforeEach timeout).
+//
+// We checkpoint and switch journal_mode to DELETE before disconnecting so the
+// template is a single self-contained file (no -wal/-shm sidecars to copy and
+// no libsql state crossing the file-copy boundary).
+let templatePromise: Promise<string> | undefined;
+
+async function ensureTemplatePath(): Promise<string> {
+  if (!templatePromise) {
+    templatePromise = buildTemplate();
+  }
+  return templatePromise;
+}
+
+async function buildTemplate(): Promise<string> {
+  const tempDir = mkdtempSync(join(tmpdir(), "vimbus-db-template-"));
   const dbPath = join(tempDir, "test.db").replace(/\\/g, "/");
   const prisma = createPrismaClient(`file:${dbPath}`);
+  try {
+    await applyMigrations(prisma);
+    try {
+      await prisma.$executeRawUnsafe("PRAGMA journal_mode=DELETE");
+      await prisma.$executeRawUnsafe("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      // Best-effort; if libsql doesn't honor these PRAGMAs the copy still works
+      // because we copy only the main .db file.
+    }
+  } finally {
+    await prisma.$disconnect();
+  }
+  return dbPath;
+}
 
-  await applyMigrations(prisma);
-
+export async function createIsolatedPrisma(prefix = "vimbus-db-") {
+  const templatePath = await ensureTemplatePath();
+  const tempDir = mkdtempSync(join(tmpdir(), prefix));
+  const dbPath = join(tempDir, "test.db").replace(/\\/g, "/");
+  copyFileSync(templatePath, dbPath);
+  const prisma = createPrismaClient(`file:${dbPath}`);
   return { prisma, tempDir };
 }
 

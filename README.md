@@ -88,10 +88,24 @@ bun run cli
 
 ### Quality Checks
 
+`bun run verify:m2` is the authoritative answer to "is the tree green?" It runs `typecheck`, the unit matrix in parallel, the same matrix again under single-fork (an audit pass that confirms no test depends on parallelism), and the Postgres-backed smoke under docker-compose. A green `verify:m2` is the per-PR and pre-release bar.
+
 ```bash
-bun run test:vitest
-bun run typecheck
+bun run verify:m2
 ```
+
+Faster, narrower checks for inner-loop work:
+
+```bash
+bun run typecheck       # type signatures only
+bun run test:unit       # unit suite, parallel pool (fast inner loop)
+bun run test:serial     # unit suite, single fork (run if you suspect a parallel-pool flake)
+bun run test:postgres   # docker-compose Postgres + adapter smoke (requires Docker)
+```
+
+`test:postgres` runs `docker compose up -d --wait postgres`, pushes the Prisma schema, runs the Postgres-backed smoke, then tears the service down. The compose service binds `127.0.0.1:55432`. Docker is the only host-side prerequisite.
+
+The legacy `test:vitest` and `test:vitest:postgres` scripts still work for ad-hoc invocations, but `verify:m2` is canonical.
 
 ## How The Current Flow Works
 
