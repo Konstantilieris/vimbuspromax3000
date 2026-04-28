@@ -14,6 +14,8 @@ export const PLANNER_COMMANDS = [
   "/approve:plan",
   "/tasks",
   "/approvals",
+  // VIM-38 Sprint 5 — read-only view over GET /projects/:id/dependency-map.
+  "/dependency-map",
 ] as const;
 
 /**
@@ -127,6 +129,8 @@ export async function runPlannerCommand(
       return runListTasks(apiUrl, parsed, request);
     case "/approvals":
       return runListApprovals(apiUrl, parsed, request);
+    case "/dependency-map":
+      return runDependencyMapView(apiUrl, parsed, request);
   }
 
   throw new Error(`Unknown planner command: ${command}`);
@@ -456,6 +460,118 @@ async function runListApprovals(apiUrl: string, options: ParsedOptions, request:
   );
 
   return getApprovalsViewSnapshot(approvals);
+}
+
+// VIM-38 Sprint 5 — read-only dependency-map view. Lives in its own
+// function (no shared state with the planner-interview state machine
+// VIM-34 is editing nearby) so the merge-ready surface area is just
+// this block plus the PLANNER_COMMANDS / switch additions above.
+type ApiDependencyMapNode = {
+  id: string;
+  stableId: string;
+  title: string;
+  status: string;
+  type: string;
+  complexity: string;
+  orderIndex: number;
+  epicId: string;
+  epicKey: string;
+  epicTitle: string;
+};
+
+type ApiDependencyMapEdge = { from: string; to: string };
+
+type ApiDependencyMap = {
+  nodes: ApiDependencyMapNode[];
+  edges: ApiDependencyMapEdge[];
+};
+
+type ApiDependencyMapCycle = {
+  error: "cycle";
+  cycle: string[];
+};
+
+export function getDependencyMapViewSnapshot(map: ApiDependencyMap): string {
+  const lines = [`${PRODUCT_NAME} dependency map`];
+
+  if (map.nodes.length === 0) {
+    lines.push("No tasks.");
+    return lines.join("\n");
+  }
+
+  // Reverse-adjacency so each task line lists its declared dependencies.
+  // Sorting the deps alphabetically keeps the rendered view stable when
+  // the operator scans for diffs between runs.
+  const dependenciesByTo = new Map<string, string[]>();
+  for (const edge of map.edges) {
+    const existing = dependenciesByTo.get(edge.to) ?? [];
+    existing.push(edge.from);
+    dependenciesByTo.set(edge.to, existing);
+  }
+  for (const deps of dependenciesByTo.values()) {
+    deps.sort();
+  }
+
+  lines.push(`Tasks (${map.nodes.length}, topologically sorted):`);
+  for (const node of map.nodes) {
+    const deps = dependenciesByTo.get(node.stableId) ?? [];
+    const requires = deps.length > 0 ? ` requires=${deps.join(",")}` : "";
+    lines.push(`- ${node.stableId} ${node.title} [${node.epicKey}] ${node.status}${requires}`);
+  }
+
+  lines.push(`Edges (${map.edges.length}):`);
+  if (map.edges.length === 0) {
+    lines.push("- (none)");
+  } else {
+    for (const edge of map.edges) {
+      lines.push(`- ${edge.from} -> ${edge.to}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function getDependencyMapCycleSnapshot(cycle: string[]): string {
+  // A 422 cycle response is presented as a clearly-labelled single
+  // block so the operator does not confuse it with the empty-graph
+  // case. The arrow chain mirrors the structure of the cycle witness
+  // returned by the API (start -> ... -> start).
+  const chain = cycle.length === 0 ? "(empty)" : `${cycle.join(" -> ")} -> ${cycle[0]}`;
+  return [
+    `${PRODUCT_NAME} dependency map`,
+    "Cycle detected. Resolve the offending requires entries before re-running.",
+    `Cycle: ${chain}`,
+  ].join("\n");
+}
+
+async function runDependencyMapView(apiUrl: string, options: ParsedOptions, request: typeof fetch) {
+  const projectId = requireOption(options, "project-id");
+  const url = `${apiUrl}/projects/${encodeURIComponent(projectId)}/dependency-map`;
+  const response = await request(url, {
+    method: "GET",
+    headers: undefined,
+    body: undefined,
+  });
+  const text = await response.text();
+  const payload = text ? (JSON.parse(text) as unknown) : undefined;
+
+  if (response.status === 422 && isCyclePayload(payload)) {
+    return getDependencyMapCycleSnapshot(payload.cycle);
+  }
+
+  if (!response.ok) {
+    const message = isObject(payload) && typeof payload.error === "string" ? payload.error : response.statusText;
+    throw new Error(`API ${response.status}: ${message}`);
+  }
+
+  return getDependencyMapViewSnapshot(payload as ApiDependencyMap);
+}
+
+function isCyclePayload(value: unknown): value is ApiDependencyMapCycle {
+  if (!isObject(value)) return false;
+  if ((value as { error?: unknown }).error !== "cycle") return false;
+  const cycle = (value as { cycle?: unknown }).cycle;
+  return Array.isArray(cycle) && cycle.every((entry) => typeof entry === "string");
 }
 
 async function requestJson<T>(
