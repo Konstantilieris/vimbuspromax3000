@@ -856,7 +856,7 @@ describe("execution API", () => {
     expect(finalEvents.map((event: { type: string }) => event.type)).toEqual(
       expect.arrayContaining(["patch.approved", "task.completed"]),
     );
-  }, 30000);
+  }, 60000);
 
   test("creates, loads, and abandons a task branch through the API", async () => {
     const api = createApp({

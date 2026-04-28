@@ -127,13 +127,13 @@ describe("MCP API", () => {
       expect(body.servers).toHaveLength(0);
     });
 
-    test("returns 3 seeded servers with correct toolCounts", async () => {
+    test("returns 5 seeded servers with correct toolCounts", async () => {
       const { project } = await seedProject();
       const api = createApp({ prisma });
       const res = await api.fetch(new Request(`http://localhost/mcp/servers?projectId=${project.id}`));
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.servers).toHaveLength(3);
+      expect(body.servers).toHaveLength(5);
       const fsGit = body.servers.find((s: { name: string }) => s.name === "taskgoblin-fs-git");
       expect(fsGit.toolCount).toBe(5);
       expect(fsGit.transport).toBe("stdio");
@@ -144,6 +144,10 @@ describe("MCP API", () => {
       expect(patch.trustLevel).toBe("trusted");
       const shell = body.servers.find((s: { name: string }) => s.name === "taskgoblin-shell");
       expect(shell.toolCount).toBe(1);
+      const db = body.servers.find((s: { name: string }) => s.name === "taskgoblin-db");
+      expect(db.toolCount).toBe(2);
+      const browser = body.servers.find((s: { name: string }) => s.name === "taskgoblin-browser");
+      expect(browser.toolCount).toBe(3);
     });
 
     test("ensureProjectMcpSetup is idempotent", async () => {
@@ -153,7 +157,7 @@ describe("MCP API", () => {
       const api = createApp({ prisma });
       const res = await api.fetch(new Request(`http://localhost/mcp/servers?projectId=${project.id}`));
       const body = await res.json();
-      expect(body.servers).toHaveLength(3);
+      expect(body.servers).toHaveLength(5);
     });
   });
 
@@ -164,17 +168,17 @@ describe("MCP API", () => {
       expect(res.status).toBe(404);
     });
 
-    test("returns 7 tools with correct fields after setup", async () => {
+    test("returns 12 tools with correct fields after setup", async () => {
       const { task } = await seedProject();
       const api = createApp({ prisma });
       const res = await api.fetch(new Request(`http://localhost/tasks/${task.id}/mcp/tools`));
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.tools).toHaveLength(7);
+      expect(body.tools).toHaveLength(12);
 
       const readTools = body.tools.filter((t: { mutability: string }) => t.mutability === "read");
       const writeTools = body.tools.filter((t: { mutability: string }) => t.mutability === "write");
-      expect(readTools).toHaveLength(4);
+      expect(readTools).toHaveLength(9);
       expect(writeTools).toHaveLength(3);
 
       const applyPatch = body.tools.find(
