@@ -546,6 +546,70 @@ describe("MVP integration APIs", () => {
     const linksRef = await api.fetch(new Request(`http://localhost/langsmith/links?projectId=${project.id}`));
     expect(await linksRef.json()).toHaveLength(1);
   });
+
+  test("hydrates benchmark runs from execution MCP calls and test runs", async () => {
+    const api = createApp({ prisma });
+    const { project, execution } = await seedBenchmarkExecutionTelemetry(prisma, tempDir);
+
+    const scenarioRef = await postJson(api, "/benchmarks/scenarios", {
+      projectId: project.id,
+      name: "hydrated execution",
+      goal: "Score persisted execution telemetry.",
+      expectedTools: ["first.tool", "second.tool"],
+      expectedVerificationItems: ["unit", "typecheck"],
+      passThreshold: 70,
+    });
+    expect(scenarioRef.status).toBe(201);
+    const scenario = await scenarioRef.json();
+
+    const runRef = await postJson(api, `/benchmarks/scenarios/${scenario.id}/run`, {
+      runId: "hydrated-run",
+      taskExecutionId: execution.id,
+    });
+    expect(runRef.status).toBe(201);
+    const payload = await runRef.json();
+
+    expect(payload.run.toolSequenceSummary).toEqual(["server.first.tool", "server.second.tool"]);
+    expect(payload.run.verificationSummary).toMatchObject({
+      total: 2,
+      passed: 1,
+      failed: 1,
+      allRequiredPassed: false,
+    });
+    expect(payload.run.verdict).toBe("blocked");
+    expect(
+      payload.run.dimensionScores.find((score: { dimension: string }) => score.dimension === "outcome_correctness"),
+    ).toMatchObject({ score: 0, passed: false });
+    expect(payload.evalRun.taskExecutionId).toBe(execution.id);
+  });
+
+  test("uses explicit benchmark tool calls before hydrated execution calls", async () => {
+    const api = createApp({ prisma });
+    const { project, execution } = await seedBenchmarkExecutionTelemetry(prisma, tempDir);
+
+    const scenarioRef = await postJson(api, "/benchmarks/scenarios", {
+      projectId: project.id,
+      name: "explicit tools",
+      goal: "Prefer request body tool calls.",
+      expectedTools: ["explicit.tool"],
+      expectedVerificationItems: ["unit"],
+      passThreshold: 70,
+    });
+    const scenario = await scenarioRef.json();
+
+    const runRef = await postJson(api, `/benchmarks/scenarios/${scenario.id}/run`, {
+      runId: "explicit-run",
+      taskExecutionId: execution.id,
+      toolCalls: [{ server: "request", name: "explicit.tool", status: "succeeded" }],
+      verificationItems: [{ name: "unit", status: "passed" }],
+    });
+    expect(runRef.status).toBe(201);
+    const payload = await runRef.json();
+
+    expect(payload.run.toolSequenceSummary).toEqual(["request.explicit.tool"]);
+    expect(payload.run.dimensionScores.find((score: { dimension: string }) => score.dimension === "tool_usage_quality"))
+      .toMatchObject({ score: 100, passed: true });
+  });
 });
 
 describe("execution API", () => {
@@ -1120,6 +1184,145 @@ async function seedExecutableTask(
     project,
     task,
   };
+}
+
+async function seedBenchmarkExecutionTelemetry(prisma: PrismaClient, rootPath: string) {
+  const project = await prisma.project.create({
+    data: {
+      name: "Benchmark Hydration Project",
+      rootPath,
+      baseBranch: "main",
+    },
+  });
+  const plannerRun = await prisma.plannerRun.create({
+    data: {
+      projectId: project.id,
+      status: "generated",
+      goal: "Benchmark hydration",
+    },
+  });
+  const epic = await prisma.epic.create({
+    data: {
+      projectId: project.id,
+      plannerRunId: plannerRun.id,
+      key: `BENCH-${crypto.randomUUID()}`,
+      title: "Benchmark",
+      goal: "Hydrate from execution telemetry",
+      status: "planned",
+      orderIndex: 0,
+      acceptanceJson: "[]",
+    },
+  });
+  const task = await prisma.task.create({
+    data: {
+      epicId: epic.id,
+      stableId: `BENCH-${crypto.randomUUID()}`,
+      title: "Hydrate benchmark",
+      type: "backend",
+      complexity: "medium",
+      status: "ready",
+      orderIndex: 0,
+      acceptanceJson: "[]",
+    },
+  });
+  const branch = await prisma.taskBranch.create({
+    data: {
+      taskId: task.id,
+      name: `tg/benchmark/${task.id}`,
+      base: "main",
+      state: "active",
+    },
+  });
+  const execution = await prisma.taskExecution.create({
+    data: {
+      taskId: task.id,
+      branchId: branch.id,
+      status: "completed",
+      retryCount: 1,
+    },
+  });
+  const plan = await prisma.verificationPlan.create({
+    data: {
+      taskId: task.id,
+      status: "approved",
+      rationale: "benchmark hydration test plan",
+      approvedAt: new Date("2026-01-01T00:00:00.000Z"),
+    },
+  });
+  const unit = await prisma.verificationItem.create({
+    data: {
+      planId: plan.id,
+      taskId: task.id,
+      kind: "logic",
+      title: "unit",
+      description: "unit verification",
+      command: "bun test unit",
+      status: "green",
+      orderIndex: 0,
+    },
+  });
+  const typecheck = await prisma.verificationItem.create({
+    data: {
+      planId: plan.id,
+      taskId: task.id,
+      kind: "typecheck",
+      title: "typecheck",
+      description: "typecheck verification",
+      command: "bun run typecheck",
+      status: "failed",
+      orderIndex: 1,
+    },
+  });
+
+  await prisma.mcpToolCall.createMany({
+    data: [
+      {
+        projectId: project.id,
+        taskExecutionId: execution.id,
+        serverName: "server",
+        toolName: "first.tool",
+        status: "succeeded",
+        mutability: "read",
+        createdAt: new Date("2026-01-01T00:00:01.000Z"),
+      },
+      {
+        projectId: project.id,
+        taskExecutionId: execution.id,
+        serverName: "server",
+        toolName: "second.tool",
+        status: "succeeded",
+        mutability: "read",
+        createdAt: new Date("2026-01-01T00:00:02.000Z"),
+      },
+    ],
+  });
+
+  await prisma.testRun.createMany({
+    data: [
+      {
+        taskExecutionId: execution.id,
+        verificationItemId: unit.id,
+        command: "bun test unit",
+        status: "passed",
+        exitCode: 0,
+        phase: "post_green",
+        iterationIndex: 1,
+        createdAt: new Date("2026-01-01T00:00:03.000Z"),
+      },
+      {
+        taskExecutionId: execution.id,
+        verificationItemId: typecheck.id,
+        command: "bun run typecheck",
+        status: "failed",
+        exitCode: 1,
+        phase: "post_green",
+        iterationIndex: 1,
+        createdAt: new Date("2026-01-01T00:00:04.000Z"),
+      },
+    ],
+  });
+
+  return { project, execution };
 }
 
 type SeedExecutionVerificationItem = {

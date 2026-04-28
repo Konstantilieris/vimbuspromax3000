@@ -1,4 +1,5 @@
 import { getDashboardSnapshot } from "./dashboard";
+import { isBenchmarkCommand, runBenchmarkCommand } from "./benchmark";
 import { isExecutionCommand, runExecutionCommand } from "./execution";
 import {
   LIVE_VIEW_PANES,
@@ -23,6 +24,7 @@ const isMcpMode = args.some(isMcpCommand);
 const isModelsMode = args.some(isModelsCommand);
 const isPlannerMode = args.some(isPlannerCommand);
 const isExecutionMode = args.some(isExecutionCommand);
+const isBenchmarkMode = args.some(isBenchmarkCommand);
 const projectIdArg = readArgValue(args, "--project-id");
 const apiUrlArg = readArgValue(args, "--api-url") ?? process.env.VIMBUS_API_URL ?? "http://localhost:3000";
 
@@ -78,6 +80,16 @@ if (isPlannerMode) {
 if (isExecutionMode) {
   try {
     console.log(await runExecutionCommand(args));
+    process.exit(0);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+if (isBenchmarkMode) {
+  try {
+    console.log(await runBenchmarkCommand(args));
     process.exit(0);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

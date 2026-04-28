@@ -30,6 +30,22 @@ export type StoredMcpToolCall = {
   approvalId?: string | null;
 };
 
+export type StoredBenchmarkTestRun = {
+  id?: string | null;
+  command?: string | null;
+  status?: string | null;
+  verdict?: string | null;
+  phase?: string | null;
+  iterationIndex?: number | null;
+  createdAt?: Date | string | null;
+  verificationItem?: {
+    id?: string | null;
+    title?: string | null;
+    command?: string | null;
+    orderIndex?: number | null;
+  } | null;
+};
+
 export type BenchmarkScenario = {
   id: string;
   name: string;
@@ -483,6 +499,21 @@ export function mcpToolCallToBenchmarkToolCall(call: StoredMcpToolCall): Benchma
   };
 }
 
+export function testRunToBenchmarkVerificationItem(
+  run: StoredBenchmarkTestRun,
+): BenchmarkVerificationItemResult {
+  return {
+    name: getTestRunVerificationName(run),
+    status: normalizeTestRunVerificationStatus(run.verdict ?? run.status),
+  };
+}
+
+export function testRunsToBenchmarkVerificationItems(
+  runs: readonly StoredBenchmarkTestRun[],
+): BenchmarkVerificationItemResult[] {
+  return selectLatestBenchmarkTestRuns(runs).map(testRunToBenchmarkVerificationItem);
+}
+
 export function evaluateStoredMcpToolQualityGate(
   scenario: Pick<BenchmarkScenario, "expectedTools" | "forbiddenTools">,
   storedCalls: readonly StoredMcpToolCall[],
@@ -734,6 +765,122 @@ function isMutatingToolCall(mutability: string) {
   const normalized = normalizeKey(mutability);
 
   return normalized !== "read" && normalized !== "readonly" && normalized !== "read-only";
+}
+
+function selectLatestBenchmarkTestRuns(runs: readonly StoredBenchmarkTestRun[]) {
+  const postGreenRuns = runs.filter((run) => normalizeKey(run.phase ?? "post_green") === "post_green");
+  const candidates = postGreenRuns.length > 0 ? postGreenRuns : runs;
+  const latestByItem = new Map<string, { run: StoredBenchmarkTestRun; index: number }>();
+
+  candidates.forEach((run, index) => {
+    const key = getTestRunVerificationKey(run);
+    const current = latestByItem.get(key);
+
+    if (!current || compareTestRunRecency(current, { run, index }) <= 0) {
+      latestByItem.set(key, { run, index });
+    }
+  });
+
+  return [...latestByItem.values()]
+    .sort((left, right) => compareTestRunDisplayOrder(left, right))
+    .map((entry) => entry.run);
+}
+
+function getTestRunVerificationKey(run: StoredBenchmarkTestRun) {
+  return (
+    nonEmptyString(run.verificationItem?.id) ??
+    nonEmptyString(run.verificationItem?.title) ??
+    nonEmptyString(run.command) ??
+    nonEmptyString(run.id) ??
+    "test-run"
+  );
+}
+
+function getTestRunVerificationName(run: StoredBenchmarkTestRun) {
+  return (
+    nonEmptyString(run.verificationItem?.title) ??
+    nonEmptyString(run.command) ??
+    nonEmptyString(run.id) ??
+    "test run"
+  );
+}
+
+function normalizeTestRunVerificationStatus(
+  status: string | null | undefined,
+): BenchmarkVerificationItemResult["status"] {
+  switch (normalizeKey(status ?? "")) {
+    case "passed":
+    case "pass":
+    case "green":
+    case "succeeded":
+    case "success":
+    case "completed":
+      return "passed";
+    case "failed":
+    case "fail":
+    case "red":
+    case "error":
+      return "failed";
+    case "skipped":
+    case "skip":
+      return "skipped";
+    case "blocked":
+    case "canceled":
+    case "cancelled":
+      return "blocked";
+    default:
+      return "blocked";
+  }
+}
+
+function compareTestRunRecency(
+  left: { run: StoredBenchmarkTestRun; index: number },
+  right: { run: StoredBenchmarkTestRun; index: number },
+) {
+  const iterationDelta = (left.run.iterationIndex ?? 0) - (right.run.iterationIndex ?? 0);
+
+  if (iterationDelta !== 0) {
+    return iterationDelta;
+  }
+
+  const timeDelta = toTimestamp(left.run.createdAt) - toTimestamp(right.run.createdAt);
+
+  if (timeDelta !== 0) {
+    return timeDelta;
+  }
+
+  return left.index - right.index;
+}
+
+function compareTestRunDisplayOrder(
+  left: { run: StoredBenchmarkTestRun; index: number },
+  right: { run: StoredBenchmarkTestRun; index: number },
+) {
+  const leftOrder = left.run.verificationItem?.orderIndex ?? left.index;
+  const rightOrder = right.run.verificationItem?.orderIndex ?? right.index;
+
+  if (leftOrder !== rightOrder) {
+    return leftOrder - rightOrder;
+  }
+
+  return left.index - right.index;
+}
+
+function toTimestamp(value: Date | string | null | undefined) {
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+
+  if (typeof value === "string") {
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+
+  return 0;
+}
+
+function nonEmptyString(value: string | null | undefined) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 function normalizeList(values: readonly string[] | undefined) {

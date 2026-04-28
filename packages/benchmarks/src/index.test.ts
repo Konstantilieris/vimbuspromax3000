@@ -5,6 +5,7 @@ import {
   evaluateStoredMcpToolQualityGate,
   findUnsafeMcpAttempts,
   scoreBenchmarkRun,
+  testRunsToBenchmarkVerificationItems,
   type BenchmarkRunResult,
   type BenchmarkScenario,
   type RegressionBaseline,
@@ -122,6 +123,74 @@ describe("benchmark run scoring", () => {
       reason: "unapproved_mutation",
     });
     expect(gate.score).toBe(0);
+  });
+
+  test("hydrates verification evidence from latest stored test run statuses", () => {
+    const verificationItems = testRunsToBenchmarkVerificationItems([
+      {
+        id: "run-red",
+        command: "bun test unit",
+        status: "failed",
+        phase: "pre_red",
+        iterationIndex: 1,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        verificationItem: { id: "unit", title: "unit tests", orderIndex: 1 },
+      },
+      {
+        id: "run-green-old",
+        command: "bun test unit",
+        status: "failed",
+        phase: "post_green",
+        iterationIndex: 1,
+        createdAt: "2026-01-01T00:01:00.000Z",
+        verificationItem: { id: "unit", title: "unit tests", orderIndex: 1 },
+      },
+      {
+        id: "run-green-latest",
+        command: "bun test unit",
+        status: "passed",
+        phase: "post_green",
+        iterationIndex: 2,
+        createdAt: "2026-01-01T00:02:00.000Z",
+        verificationItem: { id: "unit", title: "unit tests", orderIndex: 1 },
+      },
+      {
+        id: "run-typecheck",
+        command: "bun tsc",
+        verdict: "failed",
+        status: "passed",
+        phase: "post_green",
+        iterationIndex: 1,
+        createdAt: "2026-01-01T00:03:00.000Z",
+        verificationItem: { id: "typecheck", title: "typecheck", orderIndex: 0 },
+      },
+    ]);
+
+    expect(verificationItems).toEqual([
+      { name: "typecheck", status: "failed" },
+      { name: "unit tests", status: "passed" },
+    ]);
+
+    const run = scoreBenchmarkRun(scenario, {
+      scenarioId: scenario.id,
+      runId: "run-hydrated",
+      toolCalls: [
+        { server: "planner", name: "planner.createPlan", status: "succeeded" },
+        { server: "browser", name: "browser.verify", status: "succeeded" },
+      ],
+      verificationItems,
+    });
+
+    expect(run.verificationSummary).toMatchObject({
+      total: 2,
+      passed: 1,
+      failed: 1,
+      allRequiredPassed: false,
+    });
+    expect(run.dimensionScores.find((score) => score.dimension === "outcome_correctness")).toMatchObject({
+      score: 0,
+      passed: false,
+    });
   });
 });
 

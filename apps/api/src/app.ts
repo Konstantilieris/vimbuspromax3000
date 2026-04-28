@@ -9,7 +9,9 @@ import {
 } from "@vimbuspromax3000/agent";
 import {
   compareRegressionBaseline,
+  mcpToolCallToBenchmarkToolCall,
   scoreBenchmarkRun,
+  testRunsToBenchmarkVerificationItems,
   type BenchmarkRunResult,
   type BenchmarkScenario as BenchmarkScenarioContract,
   type BenchmarkToolCall,
@@ -52,6 +54,7 @@ import {
   listRegressionBaselines,
   listTaskMcpTools,
   listTaskSourceAssets,
+  listTestRuns,
   listVisualVerificationResults,
   listTasks,
   ingestProjectSourceAsset,
@@ -1259,9 +1262,21 @@ export function createApp(options: ApiAppOptions = {}) {
   });
 
   app.get("/benchmarks/scenarios", async (context) => {
+    const requestedProjectId = optionalString(context.req.query("projectId"));
+    const taskExecutionId = optionalString(context.req.query("taskExecutionId"));
+    const executionProjectId = !requestedProjectId && taskExecutionId
+      ? await getBenchmarkExecutionProjectId(prisma, taskExecutionId)
+      : undefined;
+
+    if (!requestedProjectId && taskExecutionId && !executionProjectId) {
+      return context.json({ error: "Task execution was not found." }, 404);
+    }
+
+    const projectId = requestedProjectId ?? executionProjectId;
+
     return context.json(
       await listBenchmarkScenarios(prisma, {
-        projectId: requireProjectId(context.req.query("projectId")),
+        projectId: requireProjectId(projectId),
         status: context.req.query("status"),
       }),
     );
@@ -1297,30 +1312,62 @@ export function createApp(options: ApiAppOptions = {}) {
       return context.json({ error: "Benchmark scenario was not found." }, 404);
     }
 
-    const toolCalls =
-      Array.isArray(body.toolCalls) && body.toolCalls.length > 0
-        ? (body.toolCalls as BenchmarkToolCall[])
-        : await loadBenchmarkToolCalls(prisma, {
-            projectId: scenarioRecord.projectId,
-            taskExecutionId: optionalString(body.taskExecutionId),
-          });
+    const taskExecutionId = optionalString(body.taskExecutionId);
+    if (taskExecutionId) {
+      const executionProjectId = await getBenchmarkExecutionProjectId(prisma, taskExecutionId);
+
+      if (!executionProjectId) {
+        return context.json({ error: "Task execution was not found." }, 404);
+      }
+
+      if (executionProjectId !== scenarioRecord.projectId) {
+        return context.json({ error: "Task execution does not belong to the benchmark scenario project." }, 422);
+      }
+    }
+
+    const hasExplicitToolCalls = Array.isArray(body.toolCalls);
+    const hasExplicitVerificationItems = Array.isArray(body.verificationItems);
+    const toolCalls = hasExplicitToolCalls
+      ? (body.toolCalls as BenchmarkToolCall[])
+      : await loadBenchmarkToolCalls(prisma, {
+          projectId: scenarioRecord.projectId,
+          taskExecutionId,
+        });
+    const verificationItems = hasExplicitVerificationItems
+      ? normalizeBenchmarkVerificationItems(body.verificationItems)
+      : taskExecutionId
+        ? await loadBenchmarkVerificationItems(prisma, { taskExecutionId })
+        : [];
+    const requestMetadata = requireRecord(body.metadata ?? {}, "metadata");
     const run = scoreBenchmarkRun(toBenchmarkScenarioContract(scenarioRecord), {
       scenarioId: scenarioRecord.id,
       runId: optionalString(body.runId) ?? crypto.randomUUID(),
       toolCalls,
-      verificationItems: normalizeBenchmarkVerificationItems(body.verificationItems),
+      verificationItems,
       dimensionEvidence: requireRecord(body.dimensionEvidence ?? {}, "dimensionEvidence"),
       retryCount: optionalInteger(body.retryCount),
       modelCost: optionalNumberValue(body.modelCost),
-      metadata: requireRecord(body.metadata ?? {}, "metadata"),
+      metadata: {
+        ...requestMetadata,
+        ...(taskExecutionId
+          ? {
+              taskExecutionId,
+              hydration: {
+                mode: "execution_telemetry",
+                toolCalls: hasExplicitToolCalls ? "explicit" : "hydrated",
+                verificationItems: hasExplicitVerificationItems ? "explicit" : "hydrated",
+              },
+            }
+          : {}),
+      },
     });
     const evalRun = await persistBenchmarkEvalRun(prisma, scenarioRecord.projectId, run, {
-      taskExecutionId: optionalString(body.taskExecutionId) ?? null,
+      taskExecutionId: taskExecutionId ?? null,
     });
 
     await appendLoopEvent(prisma, {
       projectId: scenarioRecord.projectId,
-      taskExecutionId: optionalString(body.taskExecutionId),
+      taskExecutionId,
       type: "benchmark.finished",
       payload: {
         benchmarkScenarioId: scenarioRecord.id,
@@ -2059,20 +2106,36 @@ async function loadBenchmarkToolCalls(
   prisma: PrismaClient,
   input: { projectId: string; taskExecutionId?: string },
 ): Promise<BenchmarkToolCall[]> {
-  const calls = await listMcpToolCalls(prisma, {
-    projectId: input.projectId,
-    taskExecutionId: input.taskExecutionId,
-    limit: 1000,
-  });
+  const calls = input.taskExecutionId
+    ? (await listMcpToolCallsForExecution(prisma, input.taskExecutionId)).filter(
+        (call) => call.projectId === input.projectId,
+      )
+    : await listMcpToolCalls(prisma, {
+        projectId: input.projectId,
+        limit: 1000,
+      });
 
-  return calls.map((call) => ({
-    name: call.toolName,
-    server: call.serverName,
-    status: call.status as BenchmarkToolCall["status"],
-    approved: Boolean(call.approvalId) || call.status === "approved" || call.status === "succeeded",
-    mutates: call.mutability !== "read",
+  return [...calls].sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime()).map((call) => ({
+    ...mcpToolCallToBenchmarkToolCall(call),
     reason: call.errorSummary ?? undefined,
   }));
+}
+
+async function loadBenchmarkVerificationItems(
+  prisma: PrismaClient,
+  input: { taskExecutionId: string },
+): Promise<BenchmarkVerificationItemResult[]> {
+  const testRuns = await listTestRuns(prisma, {
+    taskExecutionId: input.taskExecutionId,
+  });
+
+  return testRunsToBenchmarkVerificationItems(testRuns);
+}
+
+async function getBenchmarkExecutionProjectId(prisma: PrismaClient, taskExecutionId: string) {
+  const execution = await getTaskExecutionDetail(prisma, taskExecutionId);
+
+  return execution?.task.epic.project.id;
 }
 
 async function persistBenchmarkEvalRun(
