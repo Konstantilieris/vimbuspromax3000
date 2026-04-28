@@ -14,7 +14,9 @@
     "db:generate": "bun --filter @vimbuspromax3000/db db:generate",
     "db:migrate": "bun --filter @vimbuspromax3000/db db:migrate",
     "db:migrate:init": "bun --filter @vimbuspromax3000/db db:migrate:init",
+    "db:push:postgres": "bun --filter @vimbuspromax3000/db db:push:postgres",
     "test:vitest": "vitest run",
+    "test:vitest:postgres": "bun --filter @vimbuspromax3000/db test:vitest:postgres",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
