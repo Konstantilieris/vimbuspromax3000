@@ -4,6 +4,22 @@ _Drafted 2026-04-28, after critique of the v1 Sprint 7 proposal. Supersedes the 
 
 ---
 
+## Actual Jira key mapping (post-filing, 2026-04-28)
+
+The placeholder keys in the body of this doc (VIM-47, VIM-48, VIM-49, VIM-50) used pre-create assumed numbering. Jira auto-assigned the new epic to VIM-47, shifting all stories down by one. **Use this mapping when reading the rest of the doc**:
+
+| Plan label | Actual Jira key | Role |
+|---|---|---|
+| (new epic) | **VIM-47** | M2 Release Candidate & Dogfood (Epic) |
+| VIM-48 | **VIM-48** | Test matrix and flake hardening |
+| VIM-47 | **VIM-49** | M2 golden-path dogfood harness (minimum viable) |
+| VIM-49 | **VIM-50** | Roadmap and runbook cleanup for M2 |
+| VIM-50 | **VIM-51** | M2 golden-path full instrumentation (stretch) |
+
+VIM-48 (test matrix) lined up as planned. Blocks links: VIM-48 → VIM-49 (test matrix blocks dogfood); VIM-49 → VIM-51 (dogfood blocks stretch).
+
+---
+
 ## Theme
 
 **Prove the full loop is repeatable. Ship the test-matrix discipline that makes the proof trustworthy.**
