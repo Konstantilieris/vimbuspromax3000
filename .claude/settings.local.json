@@ -3,5 +3,9 @@
     "allow": [
       "PowerShell(bun run *)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "atlassian",
+    "slack"
+  ]
 }
