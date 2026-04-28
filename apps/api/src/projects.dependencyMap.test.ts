@@ -117,12 +117,17 @@ describe("GET /projects/:id/dependency-map", () => {
     const body = await response.json();
 
     // Node payload is a TaskSummary keyed by stableId so the CLI can
-    // pretty-print without a second round-trip to /tasks.
+    // pretty-print without a second round-trip to /tasks. With Kahn's
+    // algorithm + alphabetical tie-break: at start `ready=[A, Z]` and
+    // A wins (proving alpha-tie-break — orderIndex would have picked Z
+    // first since TASK-Z was inserted first). After A drains B is
+    // ready so `ready=[B, Z]` and B wins (alpha again). After B drains
+    // C is ready so `ready=[C, Z]` and C wins. Z is emitted last.
     expect(body.nodes.map((node: { stableId: string }) => node.stableId)).toEqual([
       "TASK-A",
-      "TASK-Z",
       "TASK-B",
       "TASK-C",
+      "TASK-Z",
     ]);
 
     expect(body.nodes[0]).toMatchObject({

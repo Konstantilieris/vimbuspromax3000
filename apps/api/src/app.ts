@@ -1498,6 +1498,39 @@ export function createApp(options: ApiAppOptions = {}) {
     return context.json({ evalRuns });
   });
 
+  // VIM-38 Sprint 5 — surface the project-wide task dependency graph as a
+  // real endpoint so the CLI can stop reconstructing it from scratch. The
+  // edges come from Task.requiresJson (each entry is treated as a stableId
+  // pointing at the dependency); requires entries that do not match a
+  // task in this project are dropped (they describe external/non-task
+  // prerequisites, e.g. "api: GET /tasks", and would otherwise be reported
+  // as dangling edges). Topological order uses Kahn's algorithm with an
+  // explicit min-heap-style sort on stableId at every dequeue, which
+  // makes the alphabetical tie-break observable in tests. On a cycle we
+  // return 422 with the smallest cycle witness so an operator can fix the
+  // offending edge by hand instead of staring at the whole requires-graph.
+  app.get("/projects/:id/dependency-map", async (context) => {
+    const projectId = context.req.param("id");
+    const project = await prisma.project.findUnique({ where: { id: projectId } });
+
+    if (!project) {
+      return context.json({ error: "Project was not found." }, 404);
+    }
+
+    const tasks = await prisma.task.findMany({
+      where: { epic: { projectId } },
+      include: { epic: true },
+    });
+
+    const result = buildDependencyMap(tasks);
+
+    if (result.kind === "cycle") {
+      return context.json({ error: "cycle", cycle: result.cycle }, 422);
+    }
+
+    return context.json({ nodes: result.nodes, edges: result.edges });
+  });
+
   return app;
 }
 
@@ -2212,6 +2245,283 @@ function optionalLangSmithSyncStatus(value: unknown): LangSmithSyncStatus | unde
   }
 
   return syncStatus;
+}
+
+// VIM-38 Sprint 5 — dependency-map helpers.
+//
+// `DependencyMapTask` is the slice of Task we read for the route. We
+// keep it open-ended so the call site can pass either the raw Prisma
+// `findMany({ include: { epic: true } })` row or a leaner test fixture.
+type DependencyMapTask = {
+  id: string;
+  stableId: string;
+  title: string;
+  status: string;
+  type: string;
+  complexity: string;
+  orderIndex: number;
+  requiresJson: string | null;
+  epic: { id: string; key: string; title: string };
+};
+
+export type DependencyMapNode = {
+  id: string;
+  stableId: string;
+  title: string;
+  status: string;
+  type: string;
+  complexity: string;
+  orderIndex: number;
+  epicId: string;
+  epicKey: string;
+  epicTitle: string;
+};
+
+export type DependencyMapEdge = { from: string; to: string };
+
+export type DependencyMapResult =
+  | { kind: "ok"; nodes: DependencyMapNode[]; edges: DependencyMapEdge[] }
+  | { kind: "cycle"; cycle: string[] };
+
+/**
+ * Build the project's dependency map.
+ *
+ * Edges run from a `requires` entry (the dependency) to the task that
+ * declared it, so an entry like `requires: ["TASK-A"]` on TASK-B
+ * produces `{ from: "TASK-A", to: "TASK-B" }`. Requires entries that do
+ * not match any in-project stableId are dropped silently; the planner
+ * sometimes seeds free-form dependency labels (`"api: GET /tasks"`) that
+ * are not other tasks, and we do not want those to surface as dangling
+ * edges.
+ *
+ * Topological order: Kahn's algorithm with an explicit re-sort of the
+ * "ready" set by stableId at every dequeue. That keeps the algorithm
+ * O((V + E) log V) and — more importantly — makes the alphabetical
+ * tie-break observable in tests instead of leaking insertion order.
+ *
+ * Cycle detection: when Kahn's leaves residual nodes (in-degree > 0 in
+ * the surviving subgraph), we run a BFS-from-each-residual-node search
+ * to recover the smallest cycle. The witness is normalised to its
+ * lexicographically smallest rotation so the test assertions stay
+ * deterministic regardless of which start node BFS picked first.
+ */
+export function buildDependencyMap(tasks: DependencyMapTask[]): DependencyMapResult {
+  const stableIds = new Set(tasks.map((task) => task.stableId));
+
+  // Adjacency: from-stableId -> set of to-stableIds. We use sets first
+  // to dedupe redundant requires entries before sorting them.
+  const successors = new Map<string, Set<string>>();
+  const inDegree = new Map<string, number>();
+
+  for (const task of tasks) {
+    successors.set(task.stableId, new Set());
+    inDegree.set(task.stableId, 0);
+  }
+
+  const edges: DependencyMapEdge[] = [];
+  for (const task of tasks) {
+    const requires = parseRequiresList(task.requiresJson);
+
+    for (const dependency of requires) {
+      // Drop self-loops and edges to non-tasks; both are nonsense for a
+      // topological order and would inflate the cycle witness.
+      if (dependency === task.stableId) continue;
+      if (!stableIds.has(dependency)) continue;
+
+      const successorsOfDependency = successors.get(dependency)!;
+      if (successorsOfDependency.has(task.stableId)) continue;
+
+      successorsOfDependency.add(task.stableId);
+      inDegree.set(task.stableId, (inDegree.get(task.stableId) ?? 0) + 1);
+      edges.push({ from: dependency, to: task.stableId });
+    }
+  }
+
+  edges.sort((a, b) => (a.from === b.from ? compareStableIds(a.to, b.to) : compareStableIds(a.from, b.from)));
+
+  // Kahn's algorithm with an explicit alphabetical-by-stableId pop. We
+  // intentionally re-sort `ready` at every step rather than maintaining
+  // a heap because (a) the queue is at most |V|, (b) it keeps the code
+  // small and obviously correct, and (c) the constant overhead is
+  // dwarfed by the database round-trip that produced `tasks`.
+  const ordered: string[] = [];
+  const ready: string[] = [];
+  for (const [stableId, degree] of inDegree) {
+    if (degree === 0) ready.push(stableId);
+  }
+  ready.sort(compareStableIds);
+
+  while (ready.length > 0) {
+    const next = ready.shift()!;
+    ordered.push(next);
+
+    const dependents = [...successors.get(next)!].sort(compareStableIds);
+    for (const dependent of dependents) {
+      const remaining = (inDegree.get(dependent) ?? 0) - 1;
+      inDegree.set(dependent, remaining);
+      if (remaining === 0) {
+        ready.push(dependent);
+      }
+    }
+
+    if (dependents.length > 0) {
+      ready.sort(compareStableIds);
+    }
+  }
+
+  if (ordered.length !== tasks.length) {
+    const residualNodes = tasks
+      .map((task) => task.stableId)
+      .filter((stableId) => (inDegree.get(stableId) ?? 0) > 0);
+    const cycle = findSmallestCycle(residualNodes, successors);
+    return { kind: "cycle", cycle };
+  }
+
+  const tasksByStableId = new Map(tasks.map((task) => [task.stableId, task]));
+  const nodes: DependencyMapNode[] = ordered.map((stableId) => {
+    const task = tasksByStableId.get(stableId)!;
+    return {
+      id: task.id,
+      stableId: task.stableId,
+      title: task.title,
+      status: task.status,
+      type: task.type,
+      complexity: task.complexity,
+      orderIndex: task.orderIndex,
+      epicId: task.epic.id,
+      epicKey: task.epic.key,
+      epicTitle: task.epic.title,
+    };
+  });
+
+  return { kind: "ok", nodes, edges };
+}
+
+function parseRequiresList(requiresJson: string | null | undefined): string[] {
+  const parsed = parseJsonValue(requiresJson);
+
+  if (!Array.isArray(parsed)) return [];
+
+  const out: string[] = [];
+  for (const entry of parsed) {
+    if (typeof entry === "string" && entry.length > 0) out.push(entry);
+  }
+  return out;
+}
+
+function compareStableIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Recover the smallest cycle reachable from any residual node.
+ *
+ * For each residual start node we BFS along forward edges until we
+ * land back on the start; that yields the shortest cycle through that
+ * start. Across all starts we keep the globally shortest cycle and
+ * tie-break by the lexicographically smallest rotation so the witness
+ * is deterministic regardless of which node BFS chose first.
+ *
+ * The graph is bounded by what survived Kahn's, so this is O(V*(V+E))
+ * in the worst case — fine for human-sized task lists. We also stop
+ * each BFS early once it finds a cycle no shorter than the current
+ * best.
+ */
+function findSmallestCycle(
+  residualNodes: string[],
+  successors: Map<string, Set<string>>,
+): string[] {
+  let best: string[] = [];
+
+  // Sort starts so the search is deterministic when two cycles tie at
+  // the same length and the lex-rotation tie-break also ties.
+  for (const start of [...residualNodes].sort(compareStableIds)) {
+    const cycle = shortestCycleThrough(start, successors, best.length === 0 ? Infinity : best.length);
+    if (cycle.length === 0) continue;
+
+    if (
+      best.length === 0 ||
+      cycle.length < best.length ||
+      (cycle.length === best.length && compareCycleRotations(cycle, best) < 0)
+    ) {
+      best = cycle;
+    }
+  }
+
+  return canonicalRotation(best);
+}
+
+function shortestCycleThrough(
+  start: string,
+  successors: Map<string, Set<string>>,
+  cutoff: number,
+): string[] {
+  // BFS over forward edges. `parent` records the predecessor along the
+  // shortest path so we can reconstruct the cycle when we revisit
+  // `start`. We never enqueue `start` again ourselves; the only way it
+  // re-enters the frontier is via an incoming edge from a successor.
+  const parent = new Map<string, string>();
+  const visited = new Set<string>([start]);
+  const queue: Array<{ node: string; depth: number }> = [{ node: start, depth: 0 }];
+
+  while (queue.length > 0) {
+    const { node, depth } = queue.shift()!;
+
+    if (depth + 1 > cutoff) continue;
+
+    const next = successors.get(node);
+    if (!next) continue;
+
+    for (const successor of next) {
+      if (successor === start) {
+        // Reconstruct path: start -> ... -> node, then close with the
+        // edge node -> start.
+        const path = [node];
+        let cursor = node;
+        while (cursor !== start) {
+          const previous = parent.get(cursor);
+          if (previous === undefined) break;
+          path.push(previous);
+          cursor = previous;
+        }
+        path.reverse();
+        return path;
+      }
+
+      if (visited.has(successor)) continue;
+      visited.add(successor);
+      parent.set(successor, node);
+      queue.push({ node: successor, depth: depth + 1 });
+    }
+  }
+
+  return [];
+}
+
+function canonicalRotation(cycle: string[]): string[] {
+  if (cycle.length === 0) return cycle;
+
+  let bestStart = 0;
+  for (let i = 1; i < cycle.length; i += 1) {
+    if (compareCycleRotations(rotate(cycle, i), rotate(cycle, bestStart)) < 0) {
+      bestStart = i;
+    }
+  }
+
+  return rotate(cycle, bestStart);
+}
+
+function rotate(cycle: string[], offset: number): string[] {
+  return cycle.slice(offset).concat(cycle.slice(0, offset));
+}
+
+function compareCycleRotations(a: string[], b: string[]): number {
+  const length = Math.min(a.length, b.length);
+  for (let i = 0; i < length; i += 1) {
+    const cmp = compareStableIds(a[i]!, b[i]!);
+    if (cmp !== 0) return cmp;
+  }
+  return a.length - b.length;
 }
 
 const app = createApp();
