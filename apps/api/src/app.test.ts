@@ -909,6 +909,67 @@ describe("execution API", () => {
     expect(runCommand("git", ["branch", "--show-current"], tempDir).stdout.trim()).toBe(execution.branch.name);
   });
 
+  test("VIM-49 — POST /tasks/:id/execute/headless creates a TaskExecution without invoking the agent loop", async () => {
+    const api = createApp({
+      prisma,
+      env: {
+        VIMBUS_TEST_KEY: "present",
+      },
+    });
+    const { task } = await seedExecutableTask(api, tempDir, {
+      command: "echo execution-started",
+    });
+
+    const executeRef = await postJson(api, `/tasks/${task.id}/execute/headless`, {});
+    expect(executeRef.status).toBe(201);
+    const execution = await executeRef.json();
+
+    // The route returns the raw TaskExecution row (not the rich detail
+    // shape `/execute` returns) — that's intentional: the dogfood scenario
+    // only needs the id to drive subsequent steps.
+    expect(execution.taskId).toBe(task.id);
+    expect(execution.status).toBe("implementing");
+    expect(execution.branchId).toBeTruthy();
+    expect(execution.startedAt).toBeTruthy();
+
+    // Persisted-state assertions: branch active, task executing, no agent
+    // loop side effects.
+    const dbExecution = await prisma.taskExecution.findUnique({
+      where: { id: execution.id },
+    });
+    expect(dbExecution?.status).toBe("implementing");
+    expect(dbExecution?.policyJson).toBeNull();
+
+    const agentSteps = await prisma.agentStep.findMany({
+      where: { taskExecutionId: execution.id },
+    });
+    expect(agentSteps).toHaveLength(0);
+
+    const decisions = await prisma.modelDecision.findMany({
+      where: { taskExecutionId: execution.id },
+    });
+    expect(decisions).toHaveLength(0);
+
+    const dbTask = await prisma.task.findUnique({ where: { id: task.id } });
+    expect(dbTask?.status).toBe("executing");
+
+    const dbBranch = await prisma.taskBranch.findUnique({ where: { id: execution.branchId } });
+    expect(dbBranch?.state).toBe("active");
+
+    // task.selected event was logged with mode=headless so the loop bus
+    // can distinguish dogfood-driven executions from real agent-driven
+    // ones if anyone subscribes to the stream.
+    const events = await prisma.loopEvent.findMany({
+      where: { taskExecutionId: execution.id, type: "task.selected" },
+    });
+    expect(events).toHaveLength(1);
+    const payload = JSON.parse(events[0]!.payloadJson) as { mode?: string };
+    expect(payload.mode).toBe("headless");
+
+    // The git branch is real — prepareTaskBranch ran end-to-end.
+    expect(runCommand("git", ["branch", "--show-current"], tempDir).stdout.trim()).not.toBe("main");
+  });
+
   test("rejects a ready patch through the patch review API", async () => {
     const api = createApp({
       prisma,
