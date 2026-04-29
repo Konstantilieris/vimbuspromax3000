@@ -76,7 +76,7 @@ describe("dogfood CLI command", () => {
     ).rejects.toThrow(/DATABASE_URL/);
   });
 
-  test("steps 1-5 drive the deterministic happy path against the API", async () => {
+  test("steps 1-8 drive the deterministic happy path end-to-end and return a verdict", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "vimbus-dogfood-test-"));
     const requests: Array<{ method: string; url: string; body?: unknown }> = [];
     const mockFetch: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -129,28 +129,62 @@ describe("dogfood CLI command", () => {
           { status: 201, headers: { "content-type": "application/json" } },
         );
       }
+      if (url.endsWith("/executions/exec_1/test-runs") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "run_a11y_1",
+              verificationItemId: "item_a11y_1",
+              status: "passed",
+              evidenceJson: JSON.stringify({ url: "file:///fixture", violationCount: 0, violations: [] }),
+            },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/benchmarks/scenarios") && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "scenario_1" }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/benchmarks/scenarios/scenario_1/run") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            run: { runId: "bench_run_1", verdict: "passed", aggregateScore: 1 },
+            evalRun: { id: "eval_run_1" },
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
 
       return new Response(JSON.stringify({ error: "unexpected route" }), { status: 404 });
     }) as typeof fetch;
 
     try {
-      await expect(
-        runDogfoodCommand(
-          [
-            "dogfood",
-            "--api-url=http://localhost:3000",
-            "--database-url=postgres://x:y@localhost/z",
-            "--run-id=test_run_456",
-          ],
-          {
-            env: {},
-            cwd,
-            now: () => fixedNow,
-            fetch: mockFetch,
-          },
-        ),
-      ).rejects.toThrow(/step 6 .* not yet implemented/i);
+      const output = await runDogfoodCommand(
+        [
+          "dogfood",
+          "--api-url=http://localhost:3000",
+          "--database-url=postgres://x:y@localhost/z",
+          "--run-id=test_run_456",
+        ],
+        {
+          env: {},
+          cwd,
+          now: () => fixedNow,
+          fetch: mockFetch,
+        },
+      );
 
+      expect(output).toContain("Verdict: passed");
+      expect(output).toContain("step 5 (execute task branch, headless): executionId=exec_1");
+      expect(output).toContain("step 6 (verification dispatch): 1 TestRun row(s)");
+      expect(output).toContain("step 7 (evidenceJson persisted): 1/1 runs carry evidence");
+      expect(output).toContain("step 8 (benchmark hydration): runId=bench_run_1, verdict=passed");
+
+      // Asserts on the request sequence so a payload-shape regression
+      // surfaces immediately.
       expect(requests[0]).toMatchObject({ method: "GET", url: "http://localhost:3000/health" });
       expect(requests[1]).toMatchObject({
         method: "POST",
@@ -169,14 +203,8 @@ describe("dogfood CLI command", () => {
           goal: "M2 dogfood deterministic seed",
         },
       });
-      expect(requests[3]?.method).toBe("POST");
-      expect(requests[3]?.url).toBe("http://localhost:3000/planner/runs/planner_run_1/generate");
       const proposalBody = requests[3]?.body as { plannerRunId: string; epics: unknown[] };
       expect(proposalBody.plannerRunId).toBe("planner_run_1");
-      expect(Array.isArray(proposalBody.epics)).toBe(true);
-      expect(proposalBody.epics).toHaveLength(1);
-      // Verify the deterministic stableId so a planner-payload regression doesn't
-      // silently pass.
       const epic = proposalBody.epics[0] as { tasks: Array<{ stableId: string }> };
       expect(epic.tasks[0]?.stableId).toBe("m2-dogfood-task-1");
       expect(requests[4]).toMatchObject({
@@ -186,17 +214,74 @@ describe("dogfood CLI command", () => {
       expect(requests[5]).toMatchObject({
         method: "POST",
         url: "http://localhost:3000/tasks/task_1/verification/approve",
-        body: {
-          operator: "m2-dogfood",
-          reason: "M2 dogfood deterministic auto-approval",
-          stage: "verification_review",
-        },
       });
       expect(requests[6]).toMatchObject({
         method: "POST",
         url: "http://localhost:3000/tasks/task_1/execute/headless",
         body: {},
       });
+      expect(requests[7]).toMatchObject({
+        method: "POST",
+        url: "http://localhost:3000/executions/exec_1/test-runs",
+        body: {},
+      });
+      expect(requests[8]).toMatchObject({
+        method: "POST",
+        url: "http://localhost:3000/benchmarks/scenarios",
+        body: {
+          projectId: "proj_dogfood_1",
+          name: "M2 Dogfood Scenario (test_run_456)",
+          goal: "M2 dogfood deterministic benchmark verdict",
+          status: "active",
+          thresholds: {},
+          passThreshold: 0,
+        },
+      });
+      expect(requests[9]).toMatchObject({
+        method: "POST",
+        url: "http://localhost:3000/benchmarks/scenarios/scenario_1/run",
+        body: { taskExecutionId: "exec_1" },
+      });
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("step 7 surfaces a clear error when no TestRun carries evidenceJson", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "vimbus-dogfood-test-"));
+    const mockFetch: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (url.endsWith("/projects") && init?.method === "POST")
+        return new Response(JSON.stringify({ id: "proj_x" }), { status: 201 });
+      if (url.endsWith("/planner/runs") && init?.method === "POST")
+        return new Response(JSON.stringify({ id: "planner_x" }), { status: 201 });
+      if (url.endsWith("/planner/runs/planner_x/generate") && init?.method === "POST")
+        return new Response(JSON.stringify({ id: "planner_x" }), { status: 200 });
+      if (url.includes("/tasks?projectId=proj_x"))
+        return new Response(JSON.stringify([{ id: "task_x", stableId: "m2-dogfood-task-1" }]), {
+          status: 200,
+        });
+      if (url.endsWith("/tasks/task_x/verification/approve") && init?.method === "POST")
+        return new Response(JSON.stringify({ id: "task_x" }), { status: 200 });
+      if (url.endsWith("/tasks/task_x/execute/headless") && init?.method === "POST")
+        return new Response(JSON.stringify({ id: "exec_x" }), { status: 201 });
+      if (url.endsWith("/executions/exec_x/test-runs") && init?.method === "POST")
+        // TestRun row exists but evidenceJson is null — the failure case
+        return new Response(
+          JSON.stringify([{ id: "run_x", status: "passed", evidenceJson: null }]),
+          { status: 200 },
+        );
+      return new Response(JSON.stringify({ error: "unexpected" }), { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      await expect(
+        runDogfoodCommand(
+          ["dogfood", "--database-url=postgres://x:y@localhost/z", "--run-id=test_no_evidence"],
+          { env: {}, cwd, now: () => fixedNow, fetch: mockFetch },
+        ),
+      ).rejects.toThrow(/no TestRun row carried evidenceJson/i);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

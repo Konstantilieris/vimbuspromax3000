@@ -197,18 +197,16 @@ async function runM2GoldenPath(ctx: ScenarioContext, notes: string[]): Promise<D
   const { executionId } = await step5ExecuteTask(ctx, taskId);
   notes.push(`step 5 (execute task branch, headless): executionId=${executionId}`);
 
-  // Steps 6-8 are scaffolded but not yet implemented. The next session lands
-  // them in order. Keep the throw here so a non-dry-run accidentally invoked
-  // against a live environment fails loudly rather than silently writing an
-  // incomplete artifact bundle.
-  await step6ObserveVisualVerification(ctx, executionId);
-  // unreachable until step6 is implemented — listed for completeness of the
-  // call graph the next session will fill in.
-  // const { evidenceJson } = await step7FetchEvidence(ctx, executionId);
-  // const { benchmarkRun } = await step8HydrateBenchmark(ctx, projectId, executionId);
-  // return benchmarkRun.verdict === "passed" ? "passed" : "failed";
+  const { testRuns } = await step6ObserveVisualVerification(ctx, executionId);
+  notes.push(`step 6 (verification dispatch): ${testRuns.length} TestRun row(s)`);
 
-  return "scaffold";
+  const { evidenceCount } = await step7FetchEvidence(testRuns);
+  notes.push(`step 7 (evidenceJson persisted): ${evidenceCount}/${testRuns.length} runs carry evidence`);
+
+  const { verdict, runId: benchmarkRunId } = await step8HydrateBenchmark(ctx, projectId, executionId);
+  notes.push(`step 8 (benchmark hydration): runId=${benchmarkRunId}, verdict=${verdict}`);
+
+  return verdict === "passed" ? "passed" : "failed";
 }
 
 async function step1CleanDatabase(ctx: ScenarioContext): Promise<void> {
@@ -293,21 +291,94 @@ async function step5ExecuteTask(
   return { executionId: execution.id };
 }
 
+type TestRunSummary = {
+  id: string;
+  status: string;
+  evidenceJson?: string | null;
+  verificationItemId?: string | null;
+};
+
 async function step6ObserveVisualVerification(
-  _ctx: ScenarioContext,
-  _executionId: string,
-): Promise<void> {
-  // Implementation: poll GET /executions/:id/test-runs (or
-  // /executions/:id/visual-results) until the a11y item from the
-  // deterministic planner payload has been dispatched and persisted, then
-  // return. The headless execution from step 5 doesn't auto-dispatch; the
-  // next session decides between (a) calling
-  // POST /executions/:id/test-runs explicitly to fire the verification
-  // pipeline, or (b) extending the headless route to auto-dispatch
-  // approved no-command verification items. Either way, this step's
-  // contract is: by the time it returns, TestRun rows for the task's
-  // verification items exist with status != "queued".
-  throw new Error("VIM-49 step 6 (observe visual/a11y verification) is not yet implemented.");
+  ctx: ScenarioContext,
+  executionId: string,
+): Promise<{ testRuns: TestRunSummary[] }> {
+  // POST /executions/:id/test-runs fires the test-runner against every
+  // approved verification item on the execution. The route at app.ts
+  // returns the persisted TestRun rows (or a TestRunnerEligibilityError on
+  // 409/422 if dispatch can't proceed). For the dogfood scenario the
+  // approved set is exactly one a11y item against the fixture page, so the
+  // expected return is a single TestRun row.
+  const testRuns = await postJson<TestRunSummary[]>(
+    ctx,
+    `/executions/${encodeURIComponent(executionId)}/test-runs`,
+    {},
+  );
+  if (testRuns.length === 0) {
+    throw new Error(
+      "step 6: test-runner returned no TestRun rows. The dogfood planner payload approves exactly one a11y item — check the dispatch path (apps/api/src/app.ts /executions/:id/test-runs and packages/test-runner).",
+    );
+  }
+  return { testRuns };
+}
+
+async function step7FetchEvidence(
+  testRuns: TestRunSummary[],
+): Promise<{ evidenceCount: number; evidence: Array<{ verificationItemId: string | null; evidence: unknown }> }> {
+  // The dogfood AC requires that TestRun.evidenceJson is persisted; we
+  // already received the rows from step 6, so this is a synchronous decode
+  // pass rather than a second API roundtrip. Returns the parsed evidence
+  // payloads alongside the count of rows that actually have evidence (the
+  // a11y item should always; command-backed items may not).
+  const evidence: Array<{ verificationItemId: string | null; evidence: unknown }> = [];
+  for (const run of testRuns) {
+    if (run.evidenceJson) {
+      evidence.push({
+        verificationItemId: run.verificationItemId ?? null,
+        evidence: JSON.parse(run.evidenceJson),
+      });
+    }
+  }
+  if (evidence.length === 0) {
+    throw new Error(
+      "step 7: no TestRun row carried evidenceJson. The a11y verification item should persist axe-core results; check the dispatch path in packages/test-runner.",
+    );
+  }
+  return { evidenceCount: evidence.length, evidence };
+}
+
+async function step8HydrateBenchmark(
+  ctx: ScenarioContext,
+  projectId: string,
+  executionId: string,
+): Promise<{ verdict: string; runId: string; aggregateScore: number }> {
+  // First, create a deterministic benchmark scenario for this project. We
+  // recreate it per dogfood run so the artifact bundle's benchmark-run.json
+  // is self-contained. Reuse-by-name optimization could come later but
+  // correctness first.
+  const scenario = await postJson<{ id: string }>(ctx, "/benchmarks/scenarios", {
+    projectId,
+    name: `M2 Dogfood Scenario (${ctx.runId})`,
+    goal: "M2 dogfood deterministic benchmark verdict",
+    status: "active",
+    thresholds: {},
+    passThreshold: 0,
+  });
+
+  // Then hydrate a run from the executionId. The API loads BenchmarkToolCalls
+  // and BenchmarkVerificationItems off the execution's persisted rows, scores
+  // the run, persists the EvalRun, and returns { run, evalRun }.
+  const benchmark = await postJson<{
+    run: { runId: string; verdict: string; aggregateScore: number };
+    evalRun: { id: string };
+  }>(ctx, `/benchmarks/scenarios/${encodeURIComponent(scenario.id)}/run`, {
+    taskExecutionId: executionId,
+  });
+
+  return {
+    verdict: benchmark.run.verdict,
+    runId: benchmark.run.runId,
+    aggregateScore: benchmark.run.aggregateScore,
+  };
 }
 
 function buildDeterministicPlannerPayload(ctx: ScenarioContext, plannerRunId: string): PlannerProposalInput {
