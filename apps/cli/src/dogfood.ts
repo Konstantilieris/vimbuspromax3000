@@ -194,15 +194,16 @@ async function runM2GoldenPath(ctx: ScenarioContext, notes: string[]): Promise<D
   await step4ApproveTaskAndPlan(ctx, taskId);
   notes.push(`step 4 (approve task + verification plan): taskId=${taskId}`);
 
-  // Steps 5-8 are scaffolded but not yet implemented. The next session lands
+  const { executionId } = await step5ExecuteTask(ctx, taskId);
+  notes.push(`step 5 (execute task branch, headless): executionId=${executionId}`);
+
+  // Steps 6-8 are scaffolded but not yet implemented. The next session lands
   // them in order. Keep the throw here so a non-dry-run accidentally invoked
   // against a live environment fails loudly rather than silently writing an
   // incomplete artifact bundle.
-  await step5ExecuteTask(ctx, taskId);
-  // unreachable until step5 is implemented — listed for completeness of the
+  await step6ObserveVisualVerification(ctx, executionId);
+  // unreachable until step6 is implemented — listed for completeness of the
   // call graph the next session will fill in.
-  // const { executionId } = await step5ExecuteTask(ctx, taskId);
-  // await step6ObserveVisualVerification(ctx, executionId);
   // const { evidenceJson } = await step7FetchEvidence(ctx, executionId);
   // const { benchmarkRun } = await step8HydrateBenchmark(ctx, projectId, executionId);
   // return benchmarkRun.verdict === "passed" ? "passed" : "failed";
@@ -274,42 +275,39 @@ async function step4ApproveTaskAndPlan(ctx: ScenarioContext, taskId: string): Pr
 }
 
 async function step5ExecuteTask(
-  _ctx: ScenarioContext,
-  _taskId: string,
+  ctx: ScenarioContext,
+  taskId: string,
 ): Promise<{ executionId: string }> {
-  // OPEN DESIGN DECISION (next session resolves):
-  //
-  // POST /tasks/:id/execute starts the LLM-driven agent loop via
-  // executionService.startTaskExecution (apps/api/src/app.ts:570). The agent
-  // loop calls registered Vercel AI SDK models — without a configured model
-  // slot, this fails. The dogfood needs to be deterministic and offline, so
-  // we have two paths:
-  //
-  //   (A) Register a stub model (deterministic provider that returns a canned
-  //       patch) before calling /execute. Exercises the full agent-loop wiring
-  //       end-to-end. Cost: stub-provider plumbing + new model-registry rows
-  //       per dogfood run. Reference pattern in
-  //       packages/agent/src/execution.test.ts (look for VIMBUS_TEST_KEY env
-  //       fixture).
-  //
-  //   (B) Bypass the agent loop. The dogfood task's verification plan has no
-  //       command-backed item, only a single a11y item against the fixture
-  //       page; the test-runner can dispatch it directly via
-  //       POST /executions/:id/test-runs without ever entering the agent
-  //       loop. But this needs an execution row to exist first — and creating
-  //       one without /tasks/:id/execute means either a new "create execution
-  //       without agent" API endpoint or direct DB access from the CLI.
-  //
-  // Recommendation: lean B (direct test-run dispatch) and add one new API
-  // endpoint POST /tasks/:id/execute/headless that creates the execution row
-  // without spawning the agent loop. That keeps the CLI HTTP-only, exercises
-  // the dispatch pipeline that VIM-39 shipped, and matches the
-  // "no apps/api/src/app.ts change expected — flag if one is needed" caveat
-  // in the AC (we're flagging one). The new endpoint is a dozen lines and the
-  // dispatch behavior is what M2 needs to prove.
-  throw new Error(
-    "VIM-49 step 5 (execute task branch) is not yet implemented. Resolve the agent-loop strategy described in the inline comment, then either register a stub model and call POST /tasks/:id/execute, or add POST /tasks/:id/execute/headless and call that.",
+  // POST /tasks/:id/execute/headless — dogfood-only API route added by this
+  // story (VIM-49). It prepares the task branch and creates a TaskExecution
+  // row WITHOUT invoking the LLM-driven agent loop, so the dogfood is
+  // deterministic and offline. Production execution still flows through the
+  // sibling POST /tasks/:id/execute route. The headless route is documented
+  // and bounded in apps/api/src/app.ts and is intentionally only used by
+  // this scenario.
+  const execution = await postJson<{ id: string }>(
+    ctx,
+    `/tasks/${encodeURIComponent(taskId)}/execute/headless`,
+    {},
   );
+  return { executionId: execution.id };
+}
+
+async function step6ObserveVisualVerification(
+  _ctx: ScenarioContext,
+  _executionId: string,
+): Promise<void> {
+  // Implementation: poll GET /executions/:id/test-runs (or
+  // /executions/:id/visual-results) until the a11y item from the
+  // deterministic planner payload has been dispatched and persisted, then
+  // return. The headless execution from step 5 doesn't auto-dispatch; the
+  // next session decides between (a) calling
+  // POST /executions/:id/test-runs explicitly to fire the verification
+  // pipeline, or (b) extending the headless route to auto-dispatch
+  // approved no-command verification items. Either way, this step's
+  // contract is: by the time it returns, TestRun rows for the task's
+  // verification items exist with status != "queued".
+  throw new Error("VIM-49 step 6 (observe visual/a11y verification) is not yet implemented.");
 }
 
 function buildDeterministicPlannerPayload(ctx: ScenarioContext, plannerRunId: string): PlannerProposalInput {

@@ -76,7 +76,7 @@ describe("dogfood CLI command", () => {
     ).rejects.toThrow(/DATABASE_URL/);
   });
 
-  test("steps 1-4 drive the deterministic happy path against the API", async () => {
+  test("steps 1-5 drive the deterministic happy path against the API", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "vimbus-dogfood-test-"));
     const requests: Array<{ method: string; url: string; body?: unknown }> = [];
     const mockFetch: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -123,6 +123,12 @@ describe("dogfood CLI command", () => {
           headers: { "content-type": "application/json" },
         });
       }
+      if (url.endsWith("/tasks/task_1/execute/headless") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({ id: "exec_1", taskId: "task_1", branchId: "branch_1", status: "implementing" }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
 
       return new Response(JSON.stringify({ error: "unexpected route" }), { status: 404 });
     }) as typeof fetch;
@@ -143,7 +149,7 @@ describe("dogfood CLI command", () => {
             fetch: mockFetch,
           },
         ),
-      ).rejects.toThrow(/step 5 .* not yet implemented/i);
+      ).rejects.toThrow(/step 6 .* not yet implemented/i);
 
       expect(requests[0]).toMatchObject({ method: "GET", url: "http://localhost:3000/health" });
       expect(requests[1]).toMatchObject({
@@ -185,6 +191,11 @@ describe("dogfood CLI command", () => {
           reason: "M2 dogfood deterministic auto-approval",
           stage: "verification_review",
         },
+      });
+      expect(requests[6]).toMatchObject({
+        method: "POST",
+        url: "http://localhost:3000/tasks/task_1/execute/headless",
+        body: {},
       });
     } finally {
       rmSync(cwd, { recursive: true, force: true });

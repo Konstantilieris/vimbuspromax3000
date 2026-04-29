@@ -586,6 +586,75 @@ export function createApp(options: ApiAppOptions = {}) {
     return context.json(await executionService.startTaskExecution({ taskId: context.req.param("id") }), 201);
   });
 
+  // VIM-49 — Bypass-the-agent-loop entry point used by the M2 dogfood
+  // harness only. Creates a TaskExecution row and prepares its branch
+  // without invoking the LLM-driven agent loop or resolving a model slot.
+  // Production task execution still goes through POST /tasks/:id/execute
+  // above. This route exists so the dogfood scenario can drive
+  // verification dispatch (VIM-39) and benchmark hydration (VIM-40)
+  // against a deterministic, offline scenario; the AC for VIM-49 explicitly
+  // permits a new app.ts route here ("flag if a new app.ts route is needed
+  // — we are flagging one"). See `apps/cli/src/dogfood.ts` and
+  // `docs/SPRINT-7-PLAN.md` for the broader scenario.
+  //
+  // Integration test against an isolated prisma + initialized git repo
+  // lands with the next VIM-49 commit (step 6+ implementation pass);
+  // the dogfood CLI test exercises the route shape via mocked fetch in
+  // `apps/cli/src/dogfood.test.ts`.
+  app.post("/tasks/:id/execute/headless", async (context) => {
+    const taskId = context.req.param("id");
+    const task = await prisma.task.findUnique({
+      where: { id: taskId },
+      include: { epic: true },
+    });
+
+    if (!task) {
+      return context.json({ error: "Task was not found." }, 404);
+    }
+
+    const branch = await executionService.prepareTaskBranch({ taskId });
+    if (!branch) {
+      return context.json({ error: "Task branch could not be prepared." }, 422);
+    }
+
+    const startedAt = new Date();
+    const execution = await prisma.$transaction(async (tx) => {
+      const created = await tx.taskExecution.create({
+        data: {
+          taskId,
+          branchId: branch.id,
+          status: "implementing",
+          startedAt,
+        },
+      });
+
+      await tx.taskBranch.update({
+        where: { id: branch.id },
+        data: { state: "active" },
+      });
+
+      await tx.task.update({
+        where: { id: taskId },
+        data: { status: "executing" },
+      });
+
+      await appendLoopEvent(tx, {
+        projectId: task.epic.projectId,
+        taskExecutionId: created.id,
+        type: "task.selected",
+        payload: {
+          taskId,
+          branchName: branch.name,
+          mode: "headless",
+        },
+      });
+
+      return created;
+    });
+
+    return context.json(execution, 201);
+  });
+
   app.post("/mcp/setup", async (context) => {
     const body = await optionalJsonBody(context.req);
     const projectId = requireString(context.req.query("projectId") ?? body.projectId, "projectId");
