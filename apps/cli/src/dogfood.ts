@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { PRODUCT_NAME } from "@vimbuspromax3000/shared";
 
@@ -75,7 +76,56 @@ type ScenarioContext = {
   runId: string;
   request: typeof fetch;
   now: () => Date;
+  cwd: string;
 };
+
+// Mirror of `PlannerProposalInput` from
+// `packages/db/src/repositories/plannerRepository.ts:11-50`. We don't import
+// from `@vimbuspromax3000/db` because the CLI deliberately stays HTTP-only
+// (no DB dep) — this duplicates the contract for the deterministic seed and
+// fails at runtime via the API's normalize layer if the shape drifts.
+type PlannerProposalInput = {
+  plannerRunId: string;
+  summary?: string | null;
+  epics: Array<{
+    key: string;
+    title: string;
+    goal: string;
+    orderIndex?: number;
+    acceptance?: unknown;
+    risks?: unknown;
+    tasks: Array<{
+      stableId: string;
+      title: string;
+      description?: string | null;
+      type: string;
+      complexity: string;
+      orderIndex?: number;
+      acceptance: unknown;
+      targetFiles?: unknown;
+      requires?: unknown;
+      verificationPlan: {
+        rationale?: string | null;
+        items: Array<{
+          kind: string;
+          runner?: string | null;
+          title: string;
+          description: string;
+          rationale?: string | null;
+          command?: string | null;
+          testFilePath?: string | null;
+          route?: string | null;
+          interaction?: string | null;
+          expectedAssetId?: string | null;
+          orderIndex?: number;
+          config?: unknown;
+        }>;
+      };
+    }>;
+  }>;
+};
+
+const DOGFOOD_TASK_STABLE_ID = "m2-dogfood-task-1";
 
 export function isDogfoodCommand(value: string): boolean {
   return DOGFOOD_COMMANDS.includes(value as (typeof DOGFOOD_COMMANDS)[number]);
@@ -124,6 +174,7 @@ export async function runDogfoodCommand(
     runId,
     request,
     now,
+    cwd,
   };
 
   const verdict = await runM2GoldenPath(ctx, notes);
@@ -137,15 +188,19 @@ async function runM2GoldenPath(ctx: ScenarioContext, notes: string[]): Promise<D
   const { projectId } = await step2CreateProject(ctx);
   notes.push(`step 2 (create project): projectId=${projectId}`);
 
-  // Steps 3-8 are scaffolded but not yet implemented. The next session lands
+  const { plannerRunId, taskId } = await step3SeedPlannerOutput(ctx, projectId);
+  notes.push(`step 3 (seed planner): plannerRunId=${plannerRunId}, taskId=${taskId}`);
+
+  await step4ApproveTaskAndPlan(ctx, taskId);
+  notes.push(`step 4 (approve task + verification plan): taskId=${taskId}`);
+
+  // Steps 5-8 are scaffolded but not yet implemented. The next session lands
   // them in order. Keep the throw here so a non-dry-run accidentally invoked
   // against a live environment fails loudly rather than silently writing an
   // incomplete artifact bundle.
-  await step3SeedPlannerOutput(ctx, projectId);
-  // unreachable until step3 is implemented — listed for completeness of the
+  await step5ExecuteTask(ctx, taskId);
+  // unreachable until step5 is implemented — listed for completeness of the
   // call graph the next session will fill in.
-  // const { plannerRunId, taskId } = await step3SeedPlannerOutput(ctx, projectId);
-  // await step4ApproveTaskAndPlan(ctx, taskId);
   // const { executionId } = await step5ExecuteTask(ctx, taskId);
   // await step6ObserveVisualVerification(ctx, executionId);
   // const { evidenceJson } = await step7FetchEvidence(ctx, executionId);
@@ -177,23 +232,140 @@ async function step2CreateProject(ctx: ScenarioContext): Promise<{ projectId: st
 }
 
 async function step3SeedPlannerOutput(
-  _ctx: ScenarioContext,
-  _projectId: string,
+  ctx: ScenarioContext,
+  projectId: string,
 ): Promise<{ plannerRunId: string; taskId: string }> {
-  // Implementation: POST /planner/runs to create a run, then
-  // POST /planner/runs/:id/generate with a deterministic PlannerProposalInput
-  // (shape in packages/db/src/repositories/plannerRepository.ts:11-50). The
-  // payload short-circuits the LLM via the `hasPlannerProposalPayload` check
-  // at apps/api/src/app.ts:352. Then GET /tasks?projectId=<projectId> to find
-  // the seeded task id. The proposal fixture should contain exactly one epic
-  // with one task and one a11y verification item pointing at the
-  // dogfood-fixtures/index.html page (file:// URL, computed at runtime so the
-  // path is absolute on the operator's machine).
-  throw new Error("VIM-49 step 3 (seed deterministic planner output) is not yet implemented.");
+  // POST /planner/runs to create the run, then POST /planner/runs/:id/generate
+  // with the deterministic PlannerProposalInput payload. The API's
+  // hasPlannerProposalPayload check at apps/api/src/app.ts:352 short-circuits
+  // the LLM and persists the proposal directly via persistPlannerProposal.
+  const plannerRun = await postJson<{ id: string }>(ctx, "/planner/runs", {
+    projectId,
+    goal: "M2 dogfood deterministic seed",
+  });
+
+  await postJson(ctx, `/planner/runs/${plannerRun.id}/generate`, buildDeterministicPlannerPayload(ctx, plannerRun.id));
+
+  // Locate the seeded task by stableId. listTasks returns Task rows scoped to
+  // the project's epics; we filter for the deterministic stableId we set
+  // when constructing the proposal.
+  const tasks = await getJson<Array<{ id: string; stableId: string }>>(
+    ctx,
+    `/tasks?projectId=${encodeURIComponent(projectId)}`,
+  );
+  const task = tasks.find((entry) => entry.stableId === DOGFOOD_TASK_STABLE_ID);
+  if (!task) {
+    throw new Error(
+      `Deterministic planner payload did not produce a task with stableId=${DOGFOOD_TASK_STABLE_ID}. Got ${tasks.length} task(s).`,
+    );
+  }
+
+  return { plannerRunId: plannerRun.id, taskId: task.id };
 }
 
-// Step 4-8 helpers omitted until the next implementation pass; their
-// signatures are documented in the call graph above.
+async function step4ApproveTaskAndPlan(ctx: ScenarioContext, taskId: string): Promise<void> {
+  // POST /tasks/:id/verification/approve does both halves: it approves the
+  // task and its verification plan in one call (see app.ts:445).
+  await postJson(ctx, `/tasks/${encodeURIComponent(taskId)}/verification/approve`, {
+    operator: "m2-dogfood",
+    reason: "M2 dogfood deterministic auto-approval",
+    stage: "verification_review",
+  });
+}
+
+async function step5ExecuteTask(
+  _ctx: ScenarioContext,
+  _taskId: string,
+): Promise<{ executionId: string }> {
+  // OPEN DESIGN DECISION (next session resolves):
+  //
+  // POST /tasks/:id/execute starts the LLM-driven agent loop via
+  // executionService.startTaskExecution (apps/api/src/app.ts:570). The agent
+  // loop calls registered Vercel AI SDK models — without a configured model
+  // slot, this fails. The dogfood needs to be deterministic and offline, so
+  // we have two paths:
+  //
+  //   (A) Register a stub model (deterministic provider that returns a canned
+  //       patch) before calling /execute. Exercises the full agent-loop wiring
+  //       end-to-end. Cost: stub-provider plumbing + new model-registry rows
+  //       per dogfood run. Reference pattern in
+  //       packages/agent/src/execution.test.ts (look for VIMBUS_TEST_KEY env
+  //       fixture).
+  //
+  //   (B) Bypass the agent loop. The dogfood task's verification plan has no
+  //       command-backed item, only a single a11y item against the fixture
+  //       page; the test-runner can dispatch it directly via
+  //       POST /executions/:id/test-runs without ever entering the agent
+  //       loop. But this needs an execution row to exist first — and creating
+  //       one without /tasks/:id/execute means either a new "create execution
+  //       without agent" API endpoint or direct DB access from the CLI.
+  //
+  // Recommendation: lean B (direct test-run dispatch) and add one new API
+  // endpoint POST /tasks/:id/execute/headless that creates the execution row
+  // without spawning the agent loop. That keeps the CLI HTTP-only, exercises
+  // the dispatch pipeline that VIM-39 shipped, and matches the
+  // "no apps/api/src/app.ts change expected — flag if one is needed" caveat
+  // in the AC (we're flagging one). The new endpoint is a dozen lines and the
+  // dispatch behavior is what M2 needs to prove.
+  throw new Error(
+    "VIM-49 step 5 (execute task branch) is not yet implemented. Resolve the agent-loop strategy described in the inline comment, then either register a stub model and call POST /tasks/:id/execute, or add POST /tasks/:id/execute/headless and call that.",
+  );
+}
+
+function buildDeterministicPlannerPayload(ctx: ScenarioContext, plannerRunId: string): PlannerProposalInput {
+  const fixtureUrl = resolveFixtureUrl(ctx);
+  return {
+    plannerRunId,
+    summary: "M2 dogfood deterministic scenario",
+    epics: [
+      {
+        key: "M2-DOGFOOD",
+        title: "M2 Golden Path",
+        goal: "Verify deterministic execution loop end-to-end against a checked-in fixture page.",
+        orderIndex: 0,
+        acceptance: [{ label: "fixture page renders the expected heading and passes axe-core" }],
+        risks: [],
+        tasks: [
+          {
+            stableId: DOGFOOD_TASK_STABLE_ID,
+            title: "Render the dogfood fixture page",
+            description: "A11y verification of the deterministic fixture page shipped under apps/cli/src/dogfood-fixtures/.",
+            type: "ui",
+            complexity: "trivial",
+            orderIndex: 0,
+            acceptance: [{ label: "fixture page renders the expected heading and passes axe-core" }],
+            targetFiles: [],
+            requires: [],
+            verificationPlan: {
+              rationale: "One a11y verification item against the checked-in fixture page (no command-backed items so the verification path is deterministic and offline).",
+              items: [
+                {
+                  kind: "a11y",
+                  runner: "axe",
+                  title: "axe scan on dogfood fixture page",
+                  description: "Run axe-core against the deterministic fixture page and confirm zero violations.",
+                  rationale: "M2 dogfood scenario step 6.",
+                  command: null,
+                  testFilePath: null,
+                  route: fixtureUrl,
+                  interaction: null,
+                  expectedAssetId: null,
+                  orderIndex: 0,
+                  config: { url: fixtureUrl },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function resolveFixtureUrl(ctx: ScenarioContext): string {
+  const fixturePath = resolve(ctx.cwd, "apps", "cli", "src", "dogfood-fixtures", "index.html");
+  return pathToFileURL(fixturePath).href;
+}
 
 async function postJson<T>(ctx: ScenarioContext, path: string, body: unknown): Promise<T> {
   return requestJson<T>(ctx, path, { method: "POST", body });

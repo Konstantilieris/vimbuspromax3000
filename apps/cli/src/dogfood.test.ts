@@ -76,7 +76,7 @@ describe("dogfood CLI command", () => {
     ).rejects.toThrow(/DATABASE_URL/);
   });
 
-  test("steps 1 and 2 drive /health and POST /projects against the API", async () => {
+  test("steps 1-4 drive the deterministic happy path against the API", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "vimbus-dogfood-test-"));
     const requests: Array<{ method: string; url: string; body?: unknown }> = [];
     const mockFetch: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -99,6 +99,30 @@ describe("dogfood CLI command", () => {
           { status: 201, headers: { "content-type": "application/json" } },
         );
       }
+      if (url.endsWith("/planner/runs") && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "planner_run_1" }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/planner/runs/planner_run_1/generate") && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "planner_run_1", status: "proposed" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.includes("/tasks?projectId=proj_dogfood_1")) {
+        return new Response(
+          JSON.stringify([{ id: "task_1", stableId: "m2-dogfood-task-1" }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/tasks/task_1/verification/approve") && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "task_1", status: "verifying" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
 
       return new Response(JSON.stringify({ error: "unexpected route" }), { status: 404 });
     }) as typeof fetch;
@@ -119,7 +143,7 @@ describe("dogfood CLI command", () => {
             fetch: mockFetch,
           },
         ),
-      ).rejects.toThrow(/step 3 .* not yet implemented/i);
+      ).rejects.toThrow(/step 5 .* not yet implemented/i);
 
       expect(requests[0]).toMatchObject({ method: "GET", url: "http://localhost:3000/health" });
       expect(requests[1]).toMatchObject({
@@ -131,6 +155,74 @@ describe("dogfood CLI command", () => {
           baseBranch: "main",
         },
       });
+      expect(requests[2]).toMatchObject({
+        method: "POST",
+        url: "http://localhost:3000/planner/runs",
+        body: {
+          projectId: "proj_dogfood_1",
+          goal: "M2 dogfood deterministic seed",
+        },
+      });
+      expect(requests[3]?.method).toBe("POST");
+      expect(requests[3]?.url).toBe("http://localhost:3000/planner/runs/planner_run_1/generate");
+      const proposalBody = requests[3]?.body as { plannerRunId: string; epics: unknown[] };
+      expect(proposalBody.plannerRunId).toBe("planner_run_1");
+      expect(Array.isArray(proposalBody.epics)).toBe(true);
+      expect(proposalBody.epics).toHaveLength(1);
+      // Verify the deterministic stableId so a planner-payload regression doesn't
+      // silently pass.
+      const epic = proposalBody.epics[0] as { tasks: Array<{ stableId: string }> };
+      expect(epic.tasks[0]?.stableId).toBe("m2-dogfood-task-1");
+      expect(requests[4]).toMatchObject({
+        method: "GET",
+        url: "http://localhost:3000/tasks?projectId=proj_dogfood_1",
+      });
+      expect(requests[5]).toMatchObject({
+        method: "POST",
+        url: "http://localhost:3000/tasks/task_1/verification/approve",
+        body: {
+          operator: "m2-dogfood",
+          reason: "M2 dogfood deterministic auto-approval",
+          stage: "verification_review",
+        },
+      });
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("step 3 surfaces a clear error when the planner seed does not produce the expected task", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "vimbus-dogfood-test-"));
+    const mockFetch: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/health")) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith("/projects") && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "proj_x" }), { status: 201 });
+      }
+      if (url.endsWith("/planner/runs") && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "planner_x" }), { status: 201 });
+      }
+      if (url.endsWith("/planner/runs/planner_x/generate") && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "planner_x" }), { status: 200 });
+      }
+      if (url.includes("/tasks?projectId=proj_x")) {
+        // Return a task with the wrong stableId — simulates a drifted payload
+        return new Response(JSON.stringify([{ id: "task_wrong", stableId: "some-other-id" }]), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({ error: "unexpected" }), { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      await expect(
+        runDogfoodCommand(
+          ["dogfood", "--database-url=postgres://x:y@localhost/z", "--run-id=test_drift"],
+          { env: {}, cwd, now: () => fixedNow, fetch: mockFetch },
+        ),
+      ).rejects.toThrow(/m2-dogfood-task-1/);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

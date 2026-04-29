@@ -16,7 +16,7 @@ Two commits are ahead of `origin/main` and need pushing. The VIM-48 Jira ticket 
 2. Run VIM-48 through To Do → In Progress → In Review → Done in Jira, post the closure comment (it now references three SHAs: `9ac2ccc`, `177b1eb`, `3df9552`), and confirm VIM-49 is now unblocked.
 3. Continue VIM-49 implementation: steps 3-8 (planner seed → approve → execute → visual verification observation → evidence query → benchmark hydration), the `scripts/dogfood-m2.ts` orchestrator, artifact-bundle population, idempotency proof, runbook fill-in.
 
-The Atlassian MCP server is configured in project `.mcp.json` via `mcp-remote`. If it isn't loaded automatically at session start, approve / re-authenticate it before doing the Jira work.
+The Atlassian MCP server is configured in project `.mcp.json` via `mcp-remote`. The user is approving/promoting the project-level MCP so the server loads at session start in the next session — confirm `mcp__atlassian__*` tools are available via `ToolSearch` before starting Jira work, and if they aren't, run `npx -y mcp-remote https://mcp.atlassian.com/v1/mcp` to re-trigger the OAuth dance against the cached client at `~/.mcp-auth/`.
 
 ---
 
