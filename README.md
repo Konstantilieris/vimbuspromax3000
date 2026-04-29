@@ -94,6 +94,8 @@ bun run cli
 bun run verify:m2
 ```
 
+For the M2 golden-path dogfood scenario (single-command end-to-end run that exercises the planner → approval → execute → verify → evidence → benchmark loop against the M2 release-candidate stack), see [docs/runbooks/m2-golden-path.md](docs/runbooks/m2-golden-path.md).
+
 Faster, narrower checks for inner-loop work:
 
 ```bash
@@ -106,6 +108,18 @@ bun run test:postgres   # docker-compose Postgres + adapter smoke (requires Dock
 `test:postgres` runs `docker compose up -d --wait postgres`, pushes the Prisma schema, runs the Postgres-backed smoke, then tears the service down. The compose service binds `127.0.0.1:55432`. Docker is the only host-side prerequisite.
 
 The legacy `test:vitest` and `test:vitest:postgres` scripts still work for ad-hoc invocations, but `verify:m2` is canonical.
+
+## M2 Release Checklist
+
+M2 ("Verifiable Execution at Scale") is declared shipped when all of the following are green:
+
+- [x] VIM-48 + VIM-49 + VIM-50 are Done.
+- [x] `origin/main` has all Sprint 7 work pushed.
+- [ ] `bun run dogfood:m2` runs end-to-end on a clean machine without operator help.
+- [x] `bun run verify:m2` is deterministic — failures are product, not harness.
+- [x] `docs/runbooks/m2-golden-path.md` is the only doc a new operator needs.
+
+Sprint 7 shipped the implementation surface for criteria 1, 2, 4, 5. Criterion 3 (`bun run dogfood:m2` reaching a `passed` verdict on a clean machine) requires the Sprint 8 Chromium environmental fix; M2 will be declared shipped once that lands. See `docs/STATUS-2026-04-29-SPRINT-7-CLOSED.md` and `docs/runbooks/m2-golden-path.md` (Troubleshooting section) for the gap details.
 
 ## How The Current Flow Works
 
