@@ -33,9 +33,16 @@ import { PRODUCT_NAME } from "@vimbuspromax3000/shared";
  * Out of scope (deferred to VIM-51 stretch): LangSmith trace link assertion,
  * SSE event-sequence assertions, additional verification dimensions.
  *
- * THIS FILE IS A SCAFFOLD. Step bodies are placeholders that reference the
- * surface map. The implementation pass fills each `runStepN` function in
- * order.
+ * Implementation status (2026-04-29): structure + steps 1-2 implemented;
+ * steps 3-8 throw "not yet implemented" with inline pointers to the surface
+ * map (`apps/cli/src/dogfood.ts` file-level comment, the API routes in
+ * `apps/api/src/app.ts`, and `docs/SPRINT-7-PLAN.md` VIM-49 section).
+ *
+ * The agent-loop integration in step 5 is the largest open design call: the
+ * naive `POST /tasks/:id/execute` triggers the LLM-driven agent loop, which
+ * needs a configured model. The deterministic harness needs either a stub
+ * model in the registry or a direct test-run dispatch path that bypasses the
+ * agent loop. The next session that picks this up decides between those two.
  */
 
 export const DOGFOOD_COMMANDS = ["dogfood"] as const;
@@ -62,6 +69,14 @@ export type DogfoodRunSummary = {
   notes: string[];
 };
 
+type ScenarioContext = {
+  apiUrl: string;
+  databaseUrl: string;
+  runId: string;
+  request: typeof fetch;
+  now: () => Date;
+};
+
 export function isDogfoodCommand(value: string): boolean {
   return DOGFOOD_COMMANDS.includes(value as (typeof DOGFOOD_COMMANDS)[number]);
 }
@@ -79,6 +94,7 @@ export async function runDogfoodCommand(
   const env = options.env ?? process.env;
   const cwd = options.cwd ?? process.cwd();
   const now = options.now ?? (() => new Date());
+  const request = options.fetch ?? fetch;
 
   const apiUrl = withoutTrailingSlash(parsed["api-url"] ?? env.VIMBUS_API_URL ?? "http://localhost:3000");
   const databaseUrl = parsed["database-url"] ?? env.DATABASE_URL;
@@ -99,33 +115,138 @@ export async function runDogfoodCommand(
 
   if (dryRun) {
     notes.push("dry-run: bundle directory created, scenario skipped");
-    const finishedAt = now();
-    const summary: DogfoodRunSummary = {
-      runId,
-      startedAt: startedAt.toISOString(),
-      finishedAt: finishedAt.toISOString(),
-      durationMs: finishedAt.getTime() - startedAt.getTime(),
-      verdict: "scaffold",
-      artifactBundlePath,
-      apiUrl,
-      notes,
-    };
-    writeManifest(artifactBundlePath, summary);
-    return formatSummary(summary);
+    return finalizeRun({ runId, startedAt, now, verdict: "scaffold", artifactBundlePath, apiUrl, notes });
   }
 
-  // Implementation pass: replace the throw below with the eight scenario steps.
-  // Each step gets its own internal function that takes a context object and
-  // returns step-scoped data the next step needs. Surface map and per-step
-  // route/payload references live in the file header above and in
-  // `docs/SPRINT-7-PLAN.md` (VIM-49 closure section, once filled in).
-  throw new Error(
-    "VIM-49 dogfood scenario is not yet implemented. The CLI command shell, " +
-      "argument parsing, and artifact-bundle layout are scaffolded. Run with " +
-      "--dry-run to exercise the scaffold. Implementation lands in the next " +
-      "VIM-49 commit; see docs/runbooks/m2-golden-path.md for what each step " +
-      "will do.",
-  );
+  const ctx: ScenarioContext = {
+    apiUrl,
+    databaseUrl: databaseUrl!,
+    runId,
+    request,
+    now,
+  };
+
+  const verdict = await runM2GoldenPath(ctx, notes);
+  return finalizeRun({ runId, startedAt, now, verdict, artifactBundlePath, apiUrl, notes });
+}
+
+async function runM2GoldenPath(ctx: ScenarioContext, notes: string[]): Promise<DogfoodVerdict> {
+  await step1CleanDatabase(ctx);
+  notes.push("step 1 (clean db): API /health responded ok");
+
+  const { projectId } = await step2CreateProject(ctx);
+  notes.push(`step 2 (create project): projectId=${projectId}`);
+
+  // Steps 3-8 are scaffolded but not yet implemented. The next session lands
+  // them in order. Keep the throw here so a non-dry-run accidentally invoked
+  // against a live environment fails loudly rather than silently writing an
+  // incomplete artifact bundle.
+  await step3SeedPlannerOutput(ctx, projectId);
+  // unreachable until step3 is implemented — listed for completeness of the
+  // call graph the next session will fill in.
+  // const { plannerRunId, taskId } = await step3SeedPlannerOutput(ctx, projectId);
+  // await step4ApproveTaskAndPlan(ctx, taskId);
+  // const { executionId } = await step5ExecuteTask(ctx, taskId);
+  // await step6ObserveVisualVerification(ctx, executionId);
+  // const { evidenceJson } = await step7FetchEvidence(ctx, executionId);
+  // const { benchmarkRun } = await step8HydrateBenchmark(ctx, projectId, executionId);
+  // return benchmarkRun.verdict === "passed" ? "passed" : "failed";
+
+  return "scaffold";
+}
+
+async function step1CleanDatabase(ctx: ScenarioContext): Promise<void> {
+  // Pre-condition: the orchestrator (`scripts/dogfood-m2.ts`) brought
+  // docker-compose Postgres up and pushed a fresh schema before invoking
+  // this command. We sanity-check the API is reachable and self-reports
+  // healthy; we don't truncate or reset anything from inside this command
+  // because the orchestrator owns the lifecycle.
+  const health = await getJson<{ ok?: boolean; status?: string }>(ctx, "/health");
+  if (!health.ok && health.status !== "ok") {
+    throw new Error(`API /health did not return ok; got ${JSON.stringify(health)}`);
+  }
+}
+
+async function step2CreateProject(ctx: ScenarioContext): Promise<{ projectId: string }> {
+  const project = await postJson<{ id: string }>(ctx, "/projects", {
+    name: `M2 Dogfood (${ctx.runId})`,
+    rootPath: `/tmp/vimbus-m2-dogfood/${ctx.runId}`,
+    baseBranch: "main",
+  });
+  return { projectId: project.id };
+}
+
+async function step3SeedPlannerOutput(
+  _ctx: ScenarioContext,
+  _projectId: string,
+): Promise<{ plannerRunId: string; taskId: string }> {
+  // Implementation: POST /planner/runs to create a run, then
+  // POST /planner/runs/:id/generate with a deterministic PlannerProposalInput
+  // (shape in packages/db/src/repositories/plannerRepository.ts:11-50). The
+  // payload short-circuits the LLM via the `hasPlannerProposalPayload` check
+  // at apps/api/src/app.ts:352. Then GET /tasks?projectId=<projectId> to find
+  // the seeded task id. The proposal fixture should contain exactly one epic
+  // with one task and one a11y verification item pointing at the
+  // dogfood-fixtures/index.html page (file:// URL, computed at runtime so the
+  // path is absolute on the operator's machine).
+  throw new Error("VIM-49 step 3 (seed deterministic planner output) is not yet implemented.");
+}
+
+// Step 4-8 helpers omitted until the next implementation pass; their
+// signatures are documented in the call graph above.
+
+async function postJson<T>(ctx: ScenarioContext, path: string, body: unknown): Promise<T> {
+  return requestJson<T>(ctx, path, { method: "POST", body });
+}
+
+async function getJson<T>(ctx: ScenarioContext, path: string): Promise<T> {
+  return requestJson<T>(ctx, path, { method: "GET" });
+}
+
+async function requestJson<T>(
+  ctx: ScenarioContext,
+  path: string,
+  options: { method: string; body?: unknown },
+): Promise<T> {
+  const response = await ctx.request(`${ctx.apiUrl}${path}`, {
+    method: options.method,
+    headers: options.body !== undefined ? { "content-type": "application/json" } : undefined,
+    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+  });
+  const text = await response.text();
+  const payload = text ? (JSON.parse(text) as unknown) : undefined;
+
+  if (!response.ok) {
+    const message =
+      isObject(payload) && typeof payload.error === "string" ? payload.error : response.statusText;
+    throw new Error(`API ${response.status} ${options.method} ${path}: ${message}`);
+  }
+
+  return payload as T;
+}
+
+function finalizeRun(input: {
+  runId: string;
+  startedAt: Date;
+  now: () => Date;
+  verdict: DogfoodVerdict;
+  artifactBundlePath: string;
+  apiUrl: string;
+  notes: string[];
+}): string {
+  const finishedAt = input.now();
+  const summary: DogfoodRunSummary = {
+    runId: input.runId,
+    startedAt: input.startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - input.startedAt.getTime(),
+    verdict: input.verdict,
+    artifactBundlePath: input.artifactBundlePath,
+    apiUrl: input.apiUrl,
+    notes: input.notes,
+  };
+  writeManifest(input.artifactBundlePath, summary);
+  return formatSummary(summary);
 }
 
 export function formatSummary(summary: DogfoodRunSummary): string {
@@ -164,16 +285,16 @@ function withoutTrailingSlash(value: string): string {
 }
 
 function cryptoRandomId(): string {
-  // Avoid pulling in `node:crypto` import for a single id; the bundled `crypto`
-  // global is available under bun and node 20+ test runners.
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  // Fallback for environments without WebCrypto — vanishingly unlikely in our
-  // toolchain but keeps the function pure if the global is missing.
   const now = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 10);
   return `dogfood-${now}-${rand}`;
+}
+
+function isObject(value: unknown): value is { error?: unknown } {
+  return typeof value === "object" && value !== null;
 }
 
 function parseOptions(args: readonly string[]): ParsedOptions {

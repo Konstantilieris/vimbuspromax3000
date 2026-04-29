@@ -76,13 +76,84 @@ describe("dogfood CLI command", () => {
     ).rejects.toThrow(/DATABASE_URL/);
   });
 
-  test("scenario itself is not yet implemented (scaffold-only)", async () => {
-    await expect(
-      runDogfoodCommand(["dogfood", "--database-url=postgres://x:y@localhost/z"], {
-        env: {},
-        cwd: mkdtempSync(join(tmpdir(), "vimbus-dogfood-test-")),
-        now: () => fixedNow,
-      }),
-    ).rejects.toThrow(/scaffolded|implementation lands/i);
+  test("steps 1 and 2 drive /health and POST /projects against the API", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "vimbus-dogfood-test-"));
+    const requests: Array<{ method: string; url: string; body?: unknown }> = [];
+    const mockFetch: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({
+        method: init?.method ?? "GET",
+        url,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+
+      if (url.endsWith("/health")) {
+        return new Response(JSON.stringify({ ok: true, status: "ok" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/projects") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({ id: "proj_dogfood_1", name: "M2 Dogfood (test_run_456)" }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      return new Response(JSON.stringify({ error: "unexpected route" }), { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      await expect(
+        runDogfoodCommand(
+          [
+            "dogfood",
+            "--api-url=http://localhost:3000",
+            "--database-url=postgres://x:y@localhost/z",
+            "--run-id=test_run_456",
+          ],
+          {
+            env: {},
+            cwd,
+            now: () => fixedNow,
+            fetch: mockFetch,
+          },
+        ),
+      ).rejects.toThrow(/step 3 .* not yet implemented/i);
+
+      expect(requests[0]).toMatchObject({ method: "GET", url: "http://localhost:3000/health" });
+      expect(requests[1]).toMatchObject({
+        method: "POST",
+        url: "http://localhost:3000/projects",
+        body: {
+          name: "M2 Dogfood (test_run_456)",
+          rootPath: "/tmp/vimbus-m2-dogfood/test_run_456",
+          baseBranch: "main",
+        },
+      });
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("step 1 surfaces a clear error when /health does not return ok", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "vimbus-dogfood-test-"));
+    const mockFetch: typeof fetch = (async (_input: string | URL | Request, _init?: RequestInit) => {
+      return new Response(JSON.stringify({ status: "draining" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      await expect(
+        runDogfoodCommand(
+          ["dogfood", "--database-url=postgres://x:y@localhost/z", "--run-id=test_unhealthy"],
+          { env: {}, cwd, now: () => fixedNow, fetch: mockFetch },
+        ),
+      ).rejects.toThrow(/health did not return ok/i);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });
