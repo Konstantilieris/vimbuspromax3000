@@ -96,7 +96,7 @@ VIM-51 (M2 golden-path full instrumentation, 5 pts stretch) was **not** pulled �
 
 ## Currently open work
 
-**No open stories or tasks after Sprint 7 close.** The VIM-28 epic remains Open as a category container (eligible to close in Sprint 8 housekeeping). VIM-51 sits in the backlog (Created, not To Do — never moved into a sprint). The Sprint 8 Chromium environmental fix will be filed as a fresh ticket at sprint start with the `m2-blocker` label.
+**No open stories or tasks after Sprint 7 close.** The VIM-28 epic remains Open as a category container (eligible to close in Sprint 8 housekeeping). VIM-51 sits in the backlog (Created, not To Do — there is no Jira sprint object to "move into"; the project tracks sprint membership via the `sprint-N` label convention, not the Sprint custom field). The Sprint 8 Chromium environmental fix will be filed as a fresh ticket with the `sprint-8` and `m2-blocker` labels.
 
 Per-epic state:
 
@@ -156,7 +156,7 @@ M2 is **not** declared shipped in this STATUS doc. The strict reading of criteri
 
 ### Sprint 8 ticket-filing process
 
-Sprint 8 work has no open VIM tickets at sprint start by design — file as fresh tickets at sprint start, beginning with the Chromium fix labeled `m2-blocker`. The `sprint-8-backlog` label on VIM-42 is a closed-ticket marker only; do not interpret it as an open-ticket signal.
+Sprint 8 has **no Jira Sprint object** — the project tracks sprints via labels (`sprint-5`, `sprint-6`, `sprint-7`), and JQL `sprint is not EMPTY` returns 0 issues across the project's history. There is no sprint ceremony to gate filing; Sprint 8 work is filed as fresh tickets with the `sprint-8` label whenever the operator chooses to start. Begin with the Chromium fix (labels: `sprint-8`, `m2-blocker`). The pre-existing `sprint-8-backlog` label on VIM-42 is a closed-ticket marker only; do not interpret it as an open-ticket signal.
 
 ---
 

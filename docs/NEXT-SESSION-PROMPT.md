@@ -8,7 +8,7 @@ _Drafted 2026-04-29 after Sprint 7 close-out (VIM-48, VIM-49, VIM-50, VIM-47 epi
 
 Sprint 7 closed. **M2 declaration is deferred to Sprint 8.** Sprint 8's anchor task is the Playwright Chromium environmental fix; once that lands, re-run `bun run dogfood:m2` end-to-end to satisfy VIM-50's deferred operator-validation AC and produce a `passed` verdict, then declare M2 shipped.
 
-There are **no open VIM-prefixed tickets at session start**. Sprint 8 work files as fresh tickets at sprint start, beginning with the Chromium fix.
+There are **no open VIM-prefixed stories or tasks at session start** (the VIM-28 epic remains Open as a category container with no open children). Sprint 8 has no Jira sprint object — file work as fresh tickets with the `sprint-8` label, starting with the Chromium fix.
 
 ---
 
@@ -42,7 +42,8 @@ Site / project config is unchanged from Sprint 7:
 - Site: `apollonadmin.atlassian.net`
 - Cloud ID: `a9dc8917-e4cb-48be-bf4f-84b1f381906e`
 - Project key: `VIM`
-- Style: team-managed (next-gen software). `priority` field is not on the create screen; omit from create payloads. Story points via `customfield_10016`. Sprint via `customfield_10020`.
+- Style: team-managed (next-gen software). `priority` field is not on the create screen; omit from create payloads. Story points via `customfield_10016`.
+- **Sprint tracking is label-based**, not via `customfield_10020`. JQL `project = VIM AND sprint is not EMPTY` returns 0 issues — the Vimbus project has no Jira Sprint objects, only the `sprint-N` label convention (`sprint-5`, `sprint-6`, `sprint-7`). Sprint 8 is a label, not a board sprint; there is no sprint ceremony to gate ticket filing. File the Chromium ticket below with the `sprint-8` label whenever the operator decides to start the sprint.
 
 ### Cached transition IDs
 
@@ -56,11 +57,13 @@ Site / project config is unchanged from Sprint 7:
 
 Title suggestion: **"Playwright Chromium environmental fix + dogfood smoke pre-flight"**.
 
-Type: Task (or Story — match Sprint 7 conventions).
+Type: Story (matches Sprint 7's VIM-48/49/50 convention).
 
-Labels: `m2-blocker`.
+Labels: `sprint-8`, `m2-blocker`. (`sprint-8` is a new label; mirrors the existing `sprint-5`/`sprint-6`/`sprint-7` convention. `m2-blocker` is also new — apply it to anything blocking M2 declaration.)
 
-Story points: 3.
+Story points: 3 (set via `customfield_10016`).
+
+Parent epic: file under VIM-47 if reopened/extended for M2 declaration, or under VIM-28 (Observability & production hardening) as a residual hardening task. Recommendation: file as a top-level Story with `m2-blocker` label and no epic parent — the epic VIM-47 is already Done; reopening it for one ticket creates more confusion than value. The eventual M2 fixVersion will tie the Chromium ticket back to VIM-47 narratively.
 
 Description (use verbatim, fill in actual file paths if you adjust the smoke fixture name):
 

@@ -21,7 +21,7 @@ Project style: team-managed (next-gen software)
 
 **Field constraints (verified via `getJiraIssueTypeMetaWithFields` against Epic/Story/Task/Bug create screens):**
 - Story points: set via `customfield_10016` ("Story point estimate", number) — available on every checked issue type
-- Sprint: `customfield_10020` — available on every checked issue type, including Epic
+- Sprint custom field `customfield_10020` exists on the create screen for every checked issue type, but **the Vimbus team does not use it.** Sprint membership is tracked via the `sprint-N` label convention (`sprint-5`, `sprint-6`, `sprint-7`, etc.). JQL `project = VIM AND sprint is not EMPTY` returns 0 issues across the project's history (verified 2026-04-29). When filing Vimbus tickets, apply the appropriate `sprint-N` label and omit `customfield_10020` from create payloads.
 - Start date: `customfield_10015`; Team: `customfield_10001`; Flagged: `customfield_10021` (allowed value: "Impediment")
 - `priority` is NOT on the create screen for any VIM issue type — omit it from create payloads (VIM is a team-managed project)
 - Issue-type divergence: `parent` is available on Story/Task/Bug but NOT Epic; `customfield_10017` (Issue color) is Epic-only
