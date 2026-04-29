@@ -1,14 +1,14 @@
-# Next Session — Push VIM-48, finish Jira hygiene, then start VIM-49
+# Next Session — Finish VIM-48 Jira hygiene, then start VIM-49
 
-_Drafted 2026-04-28 after VIM-48 was implemented and committed locally (SHA `9ac2ccc`). Supersedes the prior Sprint 7 kickoff version of this file (preserved in git history at commit `eb8e371`)._
+_Drafted 2026-04-28 after VIM-48 was implemented (SHA `9ac2ccc`). Updated 2026-04-29 after the follow-up timeout fix `177b1eb` and both commits landed on `origin/main`. Supersedes the prior Sprint 7 kickoff version of this file (preserved in git history at commit `eb8e371`)._
 
 ---
 
 ## TL;DR
 
-VIM-48 (test matrix + flake hardening) is **implementation-done and verified**. The work is committed locally as `9ac2ccc` but **not yet pushed**, and the Jira ticket is still in **To Do** because the Atlassian MCP tools weren't loaded in the prior session. Your job this session, in order:
+VIM-48 (test matrix + flake hardening) is **implementation-done, verified, and pushed**. The Jira ticket is still in **To Do** because the Atlassian MCP tools weren't loaded in the prior sessions. Your job this session, in order:
 
-1. Push `9ac2ccc` to `origin/main`.
+1. Verify `9ac2ccc` and the follow-up `177b1eb` are on `origin/main` (sanity check; expect 0 commits ahead).
 2. Run VIM-48 through To Do → In Progress → In Review → Done in Jira, post the closure comment, and confirm VIM-49 is now unblocked (VIM-48 was its only blocker).
 3. Start VIM-49 (M2 golden-path dogfood harness, 8 pts).
 
@@ -22,8 +22,9 @@ The Atlassian MCP server is configured in project `.mcp.json` via `mcp-remote`. 
 
 - Path: `C:\Users\ak\TaskGoblin` (TaskGoblin / VimbusProMax3000, Bun 1.3.13 monorepo).
 - Branch: `main`.
-- Expected: **1 commit ahead** of `origin/main` — verify with `git rev-list --count origin/main..HEAD`.
-- The unpushed commit is `9ac2ccc fix(VIM-48): stratify test matrix and harden carry-over flakes for M2`. Description should match the body that was committed; if it doesn't, something has changed, surface that to the user.
+- Expected: **0 commits ahead** of `origin/main` — verify with `git rev-list --count origin/main..HEAD`.
+- The current top of `main` should be `177b1eb fix(VIM-48): drop tight 20s overrides on parallel-pool API tests`, with `9ac2ccc fix(VIM-48): stratify test matrix and harden carry-over flakes for M2` immediately below. If the top SHA differs, something has shifted — surface that to the user before doing Jira hygiene.
+- The follow-up `177b1eb` removed per-test 20000ms overrides on four `apps/api/src/app.test.ts` tests (branch lifecycle, execution start, patch reject, verification command failure). They were tighter than the 30s global from `vitest.config.ts` and tripped under parallel-pool contention on Windows after the template-DB speedup; removing them restored deterministic green.
 - Working tree expected clean except `.claude/worktrees/` (operational state, leave alone).
 
 ### Jira state
@@ -63,34 +64,24 @@ Criterion 4 is now met; criterion 2 is partly met after this session's push.
 cd /c/Users/ak/TaskGoblin
 pwd                                       # /c/Users/ak/TaskGoblin
 git status -s                             # only .claude/worktrees/ expected
-git log --oneline -5
-git rev-list --count origin/main..HEAD    # expect 1
+git log --oneline -5                      # top should be 177b1eb, then 5ac38a5, 9ac2ccc, ...
+git rev-list --count origin/main..HEAD    # expect 0
+git ls-remote origin main                 # SHA should match local main
 ```
 
-If the count is 1, ask the user to run **`! git push origin main`** to ship `9ac2ccc`. The harness blocks `git push origin main` even in auto mode; do not retry the blocked push in a loop.
-
-After the push lands, re-confirm:
-
-```
-git rev-list --count origin/main..HEAD    # expect 0 now
-git ls-remote origin main                 # SHA should match `9ac2ccc`
-```
-
-If the user has already pushed before opening this session, the count is 0 from the start; skip ahead.
+If anything is off (commits ahead, dirty tree, divergent SHA on origin), pause and surface it to the user. Don't transition Jira against a tree that doesn't match what was claimed.
 
 ### 2. Verify the work before flipping VIM-48 to Done
 
-Before posting "ACs met," prove they're actually met on the current `main`:
+`verify:m2` was green end-to-end at SHA `177b1eb` (per its commit message): typecheck + `test:unit` 471/2-skip in 94s + `test:serial` 471/2-skip in 206s + `test:postgres` 1-pass. If you trust the prior run, you can skip ahead. If you want a fresh re-run before transitioning Jira:
 
 ```
-export PATH="/c/Users/ak/.bun/bin:$PATH" && bun run typecheck
-export PATH="/c/Users/ak/.bun/bin:$PATH" && bun run test:unit
-export PATH="/c/Users/ak/.bun/bin:$PATH" && bun run test:postgres
+export PATH="/c/Users/ak/.bun/bin:$PATH" && bun run verify:m2
 ```
 
-(`test:postgres` requires Docker — same docker-compose service that VIM-48 introduced.)
+(`verify:m2` requires Docker — same docker-compose service that VIM-48 introduced. Allot ~7-8 minutes.)
 
-If `verify:m2` was already green at commit time and you trust the prior run, you can skip the chain and rely on the prior result. If anything is off, surface it before transitioning the Jira ticket.
+If anything is off, pause and surface before transitioning the Jira ticket.
 
 ### 3. VIM-48 — flip and comment
 
@@ -101,12 +92,13 @@ mcp__atlassian__transitionJiraIssue VIM-48 transition={"id":"31"}    # In Progre
 mcp__atlassian__transitionJiraIssue VIM-48 transition={"id":"41"}    # In Review -> Done
 ```
 
-Post a closure comment via `mcp__atlassian__addCommentToJiraIssue` on VIM-48 with this body verbatim (only edit the SHA if the merge SHA is different from `9ac2ccc`):
+Post a closure comment via `mcp__atlassian__addCommentToJiraIssue` on VIM-48 with this body verbatim (only edit the SHAs if they differ from `9ac2ccc` / `177b1eb`):
 
-> Merged on `main` as `9ac2ccc` (`fix(VIM-48): stratify test matrix and harden carry-over flakes for M2`). ACs met:
+> Merged on `main` as `9ac2ccc` (`fix(VIM-48): stratify test matrix and harden carry-over flakes for M2`) plus the follow-up `177b1eb` (`fix(VIM-48): drop tight 20s overrides on parallel-pool API tests`). ACs met:
 >
 > - Test-runner parallel-pool flake: fixed at root cause. `packages/db/src/testing.ts` now memoizes one migrated SQLite template per worker; `createIsolatedPrisma` copies the template main file instead of re-running the 799-line migration set per beforeEach.
 > - `packages/db` `beforeEach` 30s timeout: fixed by the same template-DB change — the two flakes shared this single root cause.
+> - `apps/api/src/app.test.ts` per-test 20s overrides on four execution-API tests (branch lifecycle, execution start, patch reject, verification command failure): removed in `177b1eb`. They had been tighter than the 30s global and tripped under parallel-pool contention on Windows after the template-DB speedup; inheriting the global restored deterministic green.
 > - `projectManagerPack.test.ts` mirror byte-equality assertion: deleted. The mirror is doc-only with no runtime consumer and no generator script; it had been a stable false-positive across Sprints 4-6. Reduced to file-existence.
 > - `app.test.ts > "dispatches approved visual items..."`: confirmed subsumed by VIM-39 (5/5 isolated runs + 1/1 alongside its 22 sibling tests). Removed from the active carry-over list in `docs/STATUS-2026-04-28.md`.
 > - Stratified scripts shipped at root: `test:unit`, `test:serial` (`vitest --no-file-parallelism`), `test:postgres`, `verify:m2` (typecheck + the three test scripts).
@@ -116,7 +108,7 @@ Post a closure comment via `mcp__atlassian__addCommentToJiraIssue` on VIM-48 wit
 > - Root `README.md` Quality Checks section names `verify:m2` authoritative.
 > - `apps/api/README.md` documents the docker-compose Postgres as canonical local Postgres for tests.
 >
-> Verification: `bun run verify:m2` green in 7m6s; three back-to-back full suites land 471 pass / 2 skip / 0 fail deterministically.
+> Verification: `bun run verify:m2` green at `177b1eb` (typecheck + `test:unit` 471/2-skip in 94s + `test:serial` 471/2-skip in 206s + `test:postgres` 1-pass). Three back-to-back full suites at the prior SHA `9ac2ccc` also landed 471 pass / 2 skip / 0 fail deterministically.
 >
 > M2 closure criterion 4 (`bun run verify:m2` deterministic — failures are product, not harness) is now met.
 

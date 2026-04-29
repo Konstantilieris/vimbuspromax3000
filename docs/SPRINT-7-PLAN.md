@@ -20,7 +20,9 @@ VIM-48 (test matrix) lined up as planned. Blocks links: VIM-48 → VIM-49 (test 
 
 ---
 
-## VIM-48 closure note (2026-04-28)
+## VIM-48 closure note (2026-04-28, follow-up 2026-04-29)
+
+VIM-48 shipped as `9ac2ccc` on 2026-04-28 with a same-day follow-up `177b1eb` (`fix(VIM-48): drop tight 20s overrides on parallel-pool API tests`). The follow-up removed per-test 20000ms timeouts on four `apps/api/src/app.test.ts` tests (branch lifecycle, execution start, patch reject, verification command failure) which had been tighter than the 30s global from `vitest.config.ts` and tripped under parallel-pool contention on Windows once the template-DB change made the suite faster overall. `verify:m2` is now green end-to-end at `177b1eb` (typecheck + `test:unit` 471/2-skip in 94s + `test:serial` 471/2-skip in 206s + `test:postgres` 1-pass).
 
 Carry-over flake table from `STATUS-2026-04-28.md` resolved as follows:
 
