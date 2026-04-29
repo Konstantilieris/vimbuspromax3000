@@ -20,6 +20,7 @@
     "test:unit": "vitest run",
     "test:serial": "vitest run --no-file-parallelism",
     "test:postgres": "bun scripts/test-postgres.ts",
+    "dogfood:m2": "bun --filter @vimbuspromax3000/cli start dogfood",
     "verify:m2": "bun run typecheck && bun run test:unit && bun run test:serial && bun run test:postgres",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

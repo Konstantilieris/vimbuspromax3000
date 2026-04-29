@@ -1,0 +1,52 @@
+<!doctype html>
+<!--
+  VIM-49 — M2 dogfood harness fixture page.
+
+  This file is loaded as `file://.../apps/cli/src/dogfood-fixtures/index.html`
+  by the dogfood scenario's visual + a11y verification step. It is intentionally
+  small and deterministic: no external assets, no scripts, no dynamic content,
+  no fonts that could vary by platform. The visual diff and axe-core scan must
+  produce byte-identical results across two consecutive dogfood runs against
+  the same clean state.
+
+  If you need to evolve this page, evolve the expected screenshot and axe
+  baseline in lockstep. The screenshot baseline lives next to this file as
+  `index.expected.png` (added when the implementation pass lands the visual
+  verification step).
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Vimbus M2 Golden Path</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        background: #101418;
+        color: #e7edf3;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+      }
+      main {
+        padding: 2rem;
+        text-align: center;
+      }
+      h1 {
+        margin: 0 0 0.5rem 0;
+        font-size: 2rem;
+      }
+      p {
+        margin: 0;
+        opacity: 0.8;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Vimbus M2 Golden Path</h1>
+      <p>Deterministic fixture page for the dogfood harness.</p>
+    </main>
+  </body>
+</html>

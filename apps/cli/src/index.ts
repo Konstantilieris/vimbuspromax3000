@@ -1,5 +1,6 @@
 import { getDashboardSnapshot } from "./dashboard";
 import { isBenchmarkCommand, runBenchmarkCommand } from "./benchmark";
+import { isDogfoodCommand, runDogfoodCommand } from "./dogfood";
 import { isExecutionCommand, runExecutionCommand } from "./execution";
 import {
   LIVE_VIEW_PANES,
@@ -25,6 +26,7 @@ const isModelsMode = args.some(isModelsCommand);
 const isPlannerMode = args.some(isPlannerCommand);
 const isExecutionMode = args.some(isExecutionCommand);
 const isBenchmarkMode = args.some(isBenchmarkCommand);
+const isDogfoodMode = args.some(isDogfoodCommand);
 const projectIdArg = readArgValue(args, "--project-id");
 const apiUrlArg = readArgValue(args, "--api-url") ?? process.env.VIMBUS_API_URL ?? "http://localhost:3000";
 
@@ -90,6 +92,16 @@ if (isExecutionMode) {
 if (isBenchmarkMode) {
   try {
     console.log(await runBenchmarkCommand(args));
+    process.exit(0);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+if (isDogfoodMode) {
+  try {
+    console.log(await runDogfoodCommand(args));
     process.exit(0);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
