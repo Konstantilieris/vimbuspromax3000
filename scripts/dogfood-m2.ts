@@ -31,8 +31,17 @@ const RUN_ID = process.env.VIMBUS_DOGFOOD_RUN_ID ?? crypto.randomUUID();
 const DATABASE_URL =
   process.env.DATABASE_URL ??
   "postgres://taskgoblin:taskgoblin@127.0.0.1:55432/taskgoblin?schema=public";
-const API_PORT = process.env.VIMBUS_DOGFOOD_API_PORT ?? "3000";
-const API_URL = `http://localhost:${API_PORT}`;
+// Default to 3137 not 3000 because 3000 is the conventional dev port for
+// many Node servers and frequently collides with a running app on the
+// operator's machine. The collision was the failure mode the first
+// end-to-end run hit. Any free port works; 3137 just rhymes with "VIM"
+// loosely enough to remember.
+const API_PORT = process.env.VIMBUS_DOGFOOD_API_PORT ?? "3137";
+// Bind via 127.0.0.1 not "localhost" so the orchestrator's fetch path
+// matches the docker-compose Postgres bind and dodges any Windows
+// localhost-IPv6 quirk where Bun.serve binds IPv4 but `fetch` resolves
+// localhost to ::1.
+const API_URL = `http://127.0.0.1:${API_PORT}`;
 const ROOT_PATH = process.env.VIMBUS_DOGFOOD_ROOT ?? `/tmp/vimbus-m2-dogfood/${RUN_ID}`;
 
 const repoRoot = process.cwd();
@@ -56,18 +65,34 @@ function run(
   }
 }
 
-async function waitForHealth(url: string, timeoutMs = 60_000): Promise<void> {
+async function waitForHealth(url: string, timeoutMs = 120_000): Promise<void> {
   const start = Date.now();
   let lastError: unknown = undefined;
+  let lastBody: unknown = undefined;
+  let attempts = 0;
   while (Date.now() - start < timeoutMs) {
+    attempts += 1;
     try {
       const response = await fetch(`${url}/health`);
       if (response.ok) {
         const body = (await response.json()) as { ok?: boolean; status?: string };
+        lastBody = body;
         if (body.ok === true || body.status === "ok") return;
+      } else {
+        lastError = new Error(`HTTP ${response.status}`);
       }
     } catch (error) {
       lastError = error;
+    }
+    if (attempts % 10 === 0) {
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+      const detail =
+        lastError instanceof Error
+          ? lastError.message
+          : lastBody !== undefined
+            ? `unexpected body: ${JSON.stringify(lastBody)}`
+            : "no response yet";
+      console.log(`[dogfood] /health still polling (${elapsed}s, ${detail})`);
     }
     await sleep(500);
   }
@@ -115,7 +140,12 @@ try {
   prepareTempRepo(ROOT_PATH, RUN_ID);
 
   console.log("[dogfood] step e: start API in Postgres mode (background)");
-  apiProcess = spawn("bun", ["--filter", "@vimbuspromax3000/api", "dev"], {
+  // Use `start` not `dev`: `dev` runs `bun --hot` which spends 30-60s
+  // bootstrapping the file watcher (one warn per non-watched workspace
+  // file) before /health responds. `start` is `bun run src/index.ts` —
+  // no watch overhead, ready in a few seconds. We don't need hot reload
+  // inside the orchestrator's lifetime.
+  apiProcess = spawn("bun", ["--filter", "@vimbuspromax3000/api", "start"], {
     cwd: repoRoot,
     env: { ...process.env, DATABASE_URL, PORT: API_PORT },
     stdio: "inherit",

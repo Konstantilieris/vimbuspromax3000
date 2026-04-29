@@ -414,7 +414,7 @@ describe("dogfood CLI command", () => {
     }
   });
 
-  test("step 3 surfaces a clear error when the planner seed does not produce the expected task", async () => {
+  test("step 3 surfaces a clear error when the planner seed does not produce exactly one task", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "vimbus-dogfood-test-"));
     const mockFetch: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
@@ -431,10 +431,17 @@ describe("dogfood CLI command", () => {
         return new Response(JSON.stringify({ id: "planner_x" }), { status: 200 });
       }
       if (url.includes("/tasks?projectId=proj_x")) {
-        // Return a task with the wrong stableId — simulates a drifted payload
-        return new Response(JSON.stringify([{ id: "task_wrong", stableId: "some-other-id" }]), {
-          status: 200,
-        });
+        // Two tasks instead of the expected single one — simulates a payload
+        // shape regression that splits the dogfood scenario across multiple
+        // tasks and breaks the rest of the chain's "find the seeded task"
+        // assumption.
+        return new Response(
+          JSON.stringify([
+            { id: "task_a", stableId: "PLAN-ABC-A" },
+            { id: "task_b", stableId: "PLAN-ABC-B" },
+          ]),
+          { status: 200 },
+        );
       }
       return new Response(JSON.stringify({ error: "unexpected" }), { status: 404 });
     }) as typeof fetch;
@@ -445,7 +452,7 @@ describe("dogfood CLI command", () => {
           ["dogfood", "--database-url=postgres://x:y@localhost/z", "--run-id=test_drift"],
           { env: {}, cwd, now: () => fixedNow, fetch: mockFetch },
         ),
-      ).rejects.toThrow(/m2-dogfood-task-1/);
+      ).rejects.toThrow(/exactly one task; got 2/);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

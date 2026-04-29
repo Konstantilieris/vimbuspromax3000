@@ -262,16 +262,25 @@ async function step3SeedPlannerOutput(
   // Locate the seeded task by stableId. listTasks returns Task rows scoped to
   // the project's epics; we filter for the deterministic stableId we set
   // when constructing the proposal.
+  // GET /tasks?projectId=... returns the seeded tasks. The dogfood's
+  // deterministic planner payload contains exactly one task, so the
+  // expected response is a single-element array. We don't filter by
+  // `stableId` because `normalizePlannerProposalInput` (called inside the
+  // /generate handler) rewrites the stable id to a planner-run-scoped form
+  // like `PLAN-<runIdSuffix>-<UPPERCASED-INPUT-ID>`; the rewrite is
+  // intentional but not stable enough to predict client-side. "Exactly one
+  // task in the project" is the cheaper invariant.
   const tasks = await getJson<Array<{ id: string; stableId: string }>>(
     ctx,
     `/tasks?projectId=${encodeURIComponent(projectId)}`,
   );
-  const task = tasks.find((entry) => entry.stableId === DOGFOOD_TASK_STABLE_ID);
-  if (!task) {
+  if (tasks.length !== 1) {
+    const seen = tasks.map((entry) => `${entry.id}:${entry.stableId}`).join(", ") || "<none>";
     throw new Error(
-      `Deterministic planner payload did not produce a task with stableId=${DOGFOOD_TASK_STABLE_ID}. Got ${tasks.length} task(s).`,
+      `Deterministic planner payload was expected to seed exactly one task; got ${tasks.length}: [${seen}].`,
     );
   }
+  const task = tasks[0]!;
 
   return { plannerRunId: plannerRun.id, taskId: task.id, plannerPayload };
 }
