@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -242,6 +242,133 @@ describe("dogfood CLI command", () => {
         url: "http://localhost:3000/benchmarks/scenarios/scenario_1/run",
         body: { taskExecutionId: "exec_1" },
       });
+
+      // Bundle: every artifact file from the runbook layout exists.
+      const bundle = join(cwd, ".artifacts", "m2", "test_run_456");
+      expect(existsSync(join(bundle, "manifest.json"))).toBe(true);
+      expect(existsSync(join(bundle, "planner-payload.json"))).toBe(true);
+      expect(existsSync(join(bundle, "agent-step-log.jsonl"))).toBe(true);
+      expect(existsSync(join(bundle, "mcp-tool-call-log.jsonl"))).toBe(true);
+      expect(existsSync(join(bundle, "screenshots"))).toBe(true);
+      expect(existsSync(join(bundle, "axe-results.json"))).toBe(true);
+      expect(existsSync(join(bundle, "evidence.json"))).toBe(true);
+      expect(existsSync(join(bundle, "benchmark-run.json"))).toBe(true);
+
+      // Bundle: a few load-bearing assertions on what each file contains.
+      // (The full byte-comparison happens in the idempotency test below.)
+      const plannerPayload = JSON.parse(readFileSync(join(bundle, "planner-payload.json"), "utf8")) as {
+        plannerRunId: string;
+        epics: Array<{ tasks: Array<{ stableId: string }> }>;
+      };
+      expect(plannerPayload.plannerRunId).toBe("planner_run_1");
+      expect(plannerPayload.epics[0]?.tasks[0]?.stableId).toBe("m2-dogfood-task-1");
+
+      const benchmarkRun = JSON.parse(readFileSync(join(bundle, "benchmark-run.json"), "utf8")) as {
+        run: { runId: string; verdict: string };
+      };
+      expect(benchmarkRun.run.runId).toBe("bench_run_1");
+      expect(benchmarkRun.run.verdict).toBe("passed");
+
+      const axeResults = JSON.parse(readFileSync(join(bundle, "axe-results.json"), "utf8")) as {
+        violationCount: number;
+      };
+      expect(axeResults.violationCount).toBe(0);
+
+      // agent-step-log is empty because /headless skips the agent loop.
+      expect(readFileSync(join(bundle, "agent-step-log.jsonl"), "utf8")).toBe("");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("two runs against the same canned state produce byte-identical bundles modulo run-id fields", async () => {
+    // Idempotency proof: same mocked API responses, two different runIds,
+    // same fixedNow, same cwd. The bundle's content files (everything except
+    // the manifest, which embeds runId + bundle path) must be byte-identical.
+    const cwd = mkdtempSync(join(tmpdir(), "vimbus-dogfood-idem-"));
+    const mockFetch: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (url.endsWith("/projects") && init?.method === "POST")
+        return new Response(JSON.stringify({ id: "proj_canned" }), { status: 201 });
+      if (url.endsWith("/planner/runs") && init?.method === "POST")
+        return new Response(JSON.stringify({ id: "planner_canned" }), { status: 201 });
+      if (url.endsWith("/planner/runs/planner_canned/generate") && init?.method === "POST")
+        return new Response(JSON.stringify({ id: "planner_canned" }), { status: 200 });
+      if (url.includes("/tasks?projectId=proj_canned"))
+        return new Response(JSON.stringify([{ id: "task_canned", stableId: "m2-dogfood-task-1" }]), {
+          status: 200,
+        });
+      if (url.endsWith("/tasks/task_canned/verification/approve"))
+        return new Response(JSON.stringify({ id: "task_canned" }), { status: 200 });
+      if (url.endsWith("/tasks/task_canned/execute/headless"))
+        return new Response(JSON.stringify({ id: "exec_canned", taskId: "task_canned" }), { status: 201 });
+      if (url.endsWith("/executions/exec_canned/test-runs"))
+        return new Response(
+          JSON.stringify([
+            {
+              id: "run_canned",
+              verificationItemId: "item_canned",
+              status: "passed",
+              evidenceJson: JSON.stringify({ url: "file:///fixture", violationCount: 0, violations: [] }),
+            },
+          ]),
+          { status: 200 },
+        );
+      if (url.endsWith("/benchmarks/scenarios") && init?.method === "POST")
+        return new Response(JSON.stringify({ id: "scenario_canned" }), { status: 201 });
+      if (url.endsWith("/benchmarks/scenarios/scenario_canned/run") && init?.method === "POST")
+        return new Response(
+          JSON.stringify({
+            run: { runId: "bench_run_canned", verdict: "passed", aggregateScore: 1 },
+            evalRun: { id: "eval_canned" },
+          }),
+          { status: 201 },
+        );
+      return new Response(JSON.stringify({ error: "unexpected" }), { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      await runDogfoodCommand(
+        ["dogfood", "--database-url=postgres://x:y@localhost/z", "--run-id=run_a"],
+        { env: {}, cwd, now: () => fixedNow, fetch: mockFetch },
+      );
+      await runDogfoodCommand(
+        ["dogfood", "--database-url=postgres://x:y@localhost/z", "--run-id=run_b"],
+        { env: {}, cwd, now: () => fixedNow, fetch: mockFetch },
+      );
+
+      const idempotentFiles = [
+        "planner-payload.json",
+        "agent-step-log.jsonl",
+        "mcp-tool-call-log.jsonl",
+        "axe-results.json",
+        "evidence.json",
+        "benchmark-run.json",
+      ];
+      for (const filename of idempotentFiles) {
+        const a = readFileSync(join(cwd, ".artifacts", "m2", "run_a", filename), "utf8");
+        const b = readFileSync(join(cwd, ".artifacts", "m2", "run_b", filename), "utf8");
+        expect({ filename, content: b }).toEqual({ filename, content: a });
+      }
+
+      // Manifest deliberately differs: it embeds runId + bundle path. Verify
+      // those are the *only* differences so the AC's "modulo run IDs" stays
+      // honest.
+      const manifestA = JSON.parse(
+        readFileSync(join(cwd, ".artifacts", "m2", "run_a", "manifest.json"), "utf8"),
+      ) as DogfoodRunSummary;
+      const manifestB = JSON.parse(
+        readFileSync(join(cwd, ".artifacts", "m2", "run_b", "manifest.json"), "utf8"),
+      ) as DogfoodRunSummary;
+      expect(manifestA.runId).toBe("run_a");
+      expect(manifestB.runId).toBe("run_b");
+      const stripped = ({
+        runId: _runId,
+        artifactBundlePath: _path,
+        ...rest
+      }: DogfoodRunSummary) => rest;
+      expect(stripped(manifestB)).toEqual(stripped(manifestA));
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

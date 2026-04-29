@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -77,6 +77,7 @@ type ScenarioContext = {
   request: typeof fetch;
   now: () => Date;
   cwd: string;
+  bundlePath: string;
 };
 
 // Mirror of `PlannerProposalInput` from
@@ -175,6 +176,7 @@ export async function runDogfoodCommand(
     request,
     now,
     cwd,
+    bundlePath: artifactBundlePath,
   };
 
   const verdict = await runM2GoldenPath(ctx, notes);
@@ -188,7 +190,7 @@ async function runM2GoldenPath(ctx: ScenarioContext, notes: string[]): Promise<D
   const { projectId } = await step2CreateProject(ctx);
   notes.push(`step 2 (create project): projectId=${projectId}`);
 
-  const { plannerRunId, taskId } = await step3SeedPlannerOutput(ctx, projectId);
+  const { plannerRunId, taskId, plannerPayload } = await step3SeedPlannerOutput(ctx, projectId);
   notes.push(`step 3 (seed planner): plannerRunId=${plannerRunId}, taskId=${taskId}`);
 
   await step4ApproveTaskAndPlan(ctx, taskId);
@@ -200,13 +202,24 @@ async function runM2GoldenPath(ctx: ScenarioContext, notes: string[]): Promise<D
   const { testRuns } = await step6ObserveVisualVerification(ctx, executionId);
   notes.push(`step 6 (verification dispatch): ${testRuns.length} TestRun row(s)`);
 
-  const { evidenceCount } = await step7FetchEvidence(testRuns);
+  const { evidenceCount, evidence } = await step7FetchEvidence(testRuns);
   notes.push(`step 7 (evidenceJson persisted): ${evidenceCount}/${testRuns.length} runs carry evidence`);
 
-  const { verdict, runId: benchmarkRunId } = await step8HydrateBenchmark(ctx, projectId, executionId);
-  notes.push(`step 8 (benchmark hydration): runId=${benchmarkRunId}, verdict=${verdict}`);
+  const benchmark = await step8HydrateBenchmark(ctx, projectId, executionId);
+  notes.push(`step 8 (benchmark hydration): runId=${benchmark.run.runId}, verdict=${benchmark.run.verdict}`);
 
-  return verdict === "passed" ? "passed" : "failed";
+  await writeArtifactBundle(ctx, {
+    executionId,
+    plannerPayload,
+    testRuns,
+    evidence,
+    benchmark,
+  });
+  notes.push(
+    "bundle: planner-payload, agent-step-log, mcp-tool-call-log, screenshots/, axe-results, evidence, benchmark-run",
+  );
+
+  return benchmark.run.verdict === "passed" ? "passed" : "failed";
 }
 
 async function step1CleanDatabase(ctx: ScenarioContext): Promise<void> {
@@ -233,7 +246,7 @@ async function step2CreateProject(ctx: ScenarioContext): Promise<{ projectId: st
 async function step3SeedPlannerOutput(
   ctx: ScenarioContext,
   projectId: string,
-): Promise<{ plannerRunId: string; taskId: string }> {
+): Promise<{ plannerRunId: string; taskId: string; plannerPayload: PlannerProposalInput }> {
   // POST /planner/runs to create the run, then POST /planner/runs/:id/generate
   // with the deterministic PlannerProposalInput payload. The API's
   // hasPlannerProposalPayload check at apps/api/src/app.ts:352 short-circuits
@@ -243,7 +256,8 @@ async function step3SeedPlannerOutput(
     goal: "M2 dogfood deterministic seed",
   });
 
-  await postJson(ctx, `/planner/runs/${plannerRun.id}/generate`, buildDeterministicPlannerPayload(ctx, plannerRun.id));
+  const plannerPayload = buildDeterministicPlannerPayload(ctx, plannerRun.id);
+  await postJson(ctx, `/planner/runs/${plannerRun.id}/generate`, plannerPayload);
 
   // Locate the seeded task by stableId. listTasks returns Task rows scoped to
   // the project's epics; we filter for the deterministic stableId we set
@@ -259,7 +273,7 @@ async function step3SeedPlannerOutput(
     );
   }
 
-  return { plannerRunId: plannerRun.id, taskId: task.id };
+  return { plannerRunId: plannerRun.id, taskId: task.id, plannerPayload };
 }
 
 async function step4ApproveTaskAndPlan(ctx: ScenarioContext, taskId: string): Promise<void> {
@@ -346,11 +360,16 @@ async function step7FetchEvidence(
   return { evidenceCount: evidence.length, evidence };
 }
 
+type BenchmarkResponse = {
+  run: { runId: string; verdict: string; aggregateScore: number };
+  evalRun: { id: string };
+};
+
 async function step8HydrateBenchmark(
   ctx: ScenarioContext,
   projectId: string,
   executionId: string,
-): Promise<{ verdict: string; runId: string; aggregateScore: number }> {
+): Promise<BenchmarkResponse> {
   // First, create a deterministic benchmark scenario for this project. We
   // recreate it per dogfood run so the artifact bundle's benchmark-run.json
   // is self-contained. Reuse-by-name optimization could come later but
@@ -367,18 +386,87 @@ async function step8HydrateBenchmark(
   // Then hydrate a run from the executionId. The API loads BenchmarkToolCalls
   // and BenchmarkVerificationItems off the execution's persisted rows, scores
   // the run, persists the EvalRun, and returns { run, evalRun }.
-  const benchmark = await postJson<{
-    run: { runId: string; verdict: string; aggregateScore: number };
-    evalRun: { id: string };
-  }>(ctx, `/benchmarks/scenarios/${encodeURIComponent(scenario.id)}/run`, {
-    taskExecutionId: executionId,
-  });
+  return postJson<BenchmarkResponse>(
+    ctx,
+    `/benchmarks/scenarios/${encodeURIComponent(scenario.id)}/run`,
+    { taskExecutionId: executionId },
+  );
+}
 
-  return {
-    verdict: benchmark.run.verdict,
-    runId: benchmark.run.runId,
-    aggregateScore: benchmark.run.aggregateScore,
-  };
+async function writeArtifactBundle(
+  ctx: ScenarioContext,
+  data: {
+    executionId: string;
+    plannerPayload: PlannerProposalInput;
+    testRuns: TestRunSummary[];
+    evidence: Array<{ verificationItemId: string | null; evidence: unknown }>;
+    benchmark: BenchmarkResponse;
+  },
+): Promise<void> {
+  // 1. planner-payload.json — verbatim deterministic seed used in step 3.
+  writeJson(ctx.bundlePath, "planner-payload.json", data.plannerPayload);
+
+  // 2. agent-step-log.jsonl — currently empty because the dogfood uses the
+  // /headless route which skips the agent loop. The file is written anyway so
+  // the bundle layout is stable across dogfood and (future) full-fat dogfood
+  // runs that exercise the agent loop. The runbook documents this.
+  writeJsonl(ctx.bundlePath, "agent-step-log.jsonl", []);
+
+  // 3. mcp-tool-call-log.jsonl — fetched via the existing API route. Verification
+  // dispatch (step 6) does drive MCP tool calls (browser/a11y) so this file
+  // generally has entries. If the route 404s in some environments, fall back
+  // to an empty file with a TODO note in the runbook.
+  let mcpCalls: unknown[] = [];
+  try {
+    mcpCalls = await getJson<unknown[]>(
+      ctx,
+      `/executions/${encodeURIComponent(data.executionId)}/mcp/calls`,
+    );
+  } catch {
+    // The route exists per app.ts; a fetch failure here is not fatal for the
+    // bundle. Empty file with the failure surfaced in the manifest notes.
+  }
+  writeJsonl(ctx.bundlePath, "mcp-tool-call-log.jsonl", mcpCalls);
+
+  // 4. screenshots/ — copy from the test-runner's output dir at
+  // .artifacts/executions/<executionId>/browser/. This is where the visual
+  // verification step writes its PNGs (per VIM-39). When no visual items run,
+  // the source dir doesn't exist and we create an empty screenshots/ in the
+  // bundle anyway for layout stability.
+  const screenshotsSource = resolve(
+    ctx.cwd,
+    ".artifacts",
+    "executions",
+    data.executionId,
+    "browser",
+  );
+  const screenshotsDest = resolve(ctx.bundlePath, "screenshots");
+  mkdirSync(screenshotsDest, { recursive: true });
+  if (existsSync(screenshotsSource)) {
+    cpSync(screenshotsSource, screenshotsDest, { recursive: true });
+  }
+
+  // 5. axe-results.json — first axe payload extracted from evidence. The
+  // dogfood scenario plans exactly one a11y verification item, so the first
+  // evidence entry's payload is the axe result we want.
+  const axeEvidence = data.evidence[0]?.evidence ?? null;
+  writeJson(ctx.bundlePath, "axe-results.json", axeEvidence);
+
+  // 6. evidence.json — full evidence array from step 7, indexed by
+  // verification item id where known.
+  writeJson(ctx.bundlePath, "evidence.json", data.evidence);
+
+  // 7. benchmark-run.json — { run, evalRun } from step 8 verbatim.
+  writeJson(ctx.bundlePath, "benchmark-run.json", data.benchmark);
+}
+
+function writeJson(bundlePath: string, filename: string, value: unknown): void {
+  writeFileSync(resolve(bundlePath, filename), JSON.stringify(value, null, 2) + "\n", "utf8");
+}
+
+function writeJsonl(bundlePath: string, filename: string, rows: readonly unknown[]): void {
+  const body = rows.length > 0 ? rows.map((row) => JSON.stringify(row)).join("\n") + "\n" : "";
+  writeFileSync(resolve(bundlePath, filename), body, "utf8");
 }
 
 function buildDeterministicPlannerPayload(ctx: ScenarioContext, plannerRunId: string): PlannerProposalInput {
