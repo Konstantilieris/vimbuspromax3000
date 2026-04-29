@@ -1,22 +1,23 @@
-# Next Session — VIM-48 Jira hygiene, then VIM-49 steps 3-8
+# Next Session — VIM-48 Jira hygiene, then VIM-49 end-to-end validation + bundle
 
-_Drafted 2026-04-28; revised 2026-04-29 in three passes as work landed: (a) `177b1eb` VIM-48 timeout follow-up on origin, (b) VIM-49 scaffold `e5f5eb5` + `d12cc48` doc on origin, (c) `3df9552` VIM-48 timeout-follow-up follow-up + `dd4aa2f` VIM-49 implementation pass 1 (steps 1-2 implemented) committed locally. Supersedes the prior Sprint 7 kickoff version of this file (preserved in git history at commit `eb8e371`)._
+_Drafted 2026-04-28; revised across multiple 2026-04-29 sessions. Latest revision after VIM-49 step-by-step implementation completed locally (all eight scenario steps wired + headless API route + docker-compose orchestrator). Supersedes the prior Sprint 7 kickoff version of this file (preserved in git history at commit `eb8e371`)._
 
 ---
 
 ## TL;DR
 
-VIM-48 (test matrix + flake hardening) is **implementation-done, verified, partially pushed**. The bulk is on `origin/main` (`9ac2ccc`, `177b1eb`); a tail-end timeout-override fix `3df9552` is committed locally and needs pushing.
+**VIM-48** (test matrix + flake hardening) — implementation-done, `verify:m2` deterministic at the merged tip. Two follow-up commits both on `origin/main` (`177b1eb`, `3df9552`). Jira ticket still in **To Do** because the Atlassian MCP tools weren't loaded in the prior sessions.
 
-VIM-49 (M2 golden-path dogfood harness) has its **scaffold + steps 1-2 committed**. Scaffold `e5f5eb5` and the doc rollover `d12cc48` are on `origin/main`; the implementation pass 1 (`dd4aa2f`, runM2GoldenPath chain + step1CleanDatabase + step2CreateProject + helper utilities + mocked-fetch tests) is committed locally.
+**VIM-49** (M2 golden-path dogfood harness, minimum viable) — all eight scenario steps implemented end-to-end against the API surface, the new `POST /tasks/:id/execute/headless` route is in (dogfood-only, bypasses the LLM-driven agent loop), and `scripts/dogfood-m2.ts` orchestrates docker-compose + schema reset + temp git repo + API spawn + CLI invoke + teardown. **The orchestrator has not yet been validated against a live environment.** The dogfood unit tests cover the HTTP request shape with mocked fetch (8/8 pass).
 
-Two commits are ahead of `origin/main` and need pushing. The VIM-48 Jira ticket is still in **To Do** because the Atlassian MCP tools weren't loaded in the prior sessions. Your job this session, in order:
+Three commits are ahead of `origin/main` and need pushing. Your job this session, in order:
 
-1. Push the local commits (`3df9552` VIM-48 follow-up and `dd4aa2f` VIM-49 implementation pass 1) to `origin/main`.
-2. Run VIM-48 through To Do → In Progress → In Review → Done in Jira, post the closure comment (it now references three SHAs: `9ac2ccc`, `177b1eb`, `3df9552`), and confirm VIM-49 is now unblocked.
-3. Continue VIM-49 implementation: steps 3-8 (planner seed → approve → execute → visual verification observation → evidence query → benchmark hydration), the `scripts/dogfood-m2.ts` orchestrator, artifact-bundle population, idempotency proof, runbook fill-in.
+1. Push the three local commits to `origin/main`.
+2. Run VIM-48 through To Do → In Progress → In Review → Done in Jira and post the closure comment.
+3. Validate the dogfood end-to-end: run `bun run dogfood:m2` against a clean Docker state and debug whatever surfaces (this is the first time the orchestrator runs against real infrastructure). Iterate until green.
+4. Land what's left for VIM-49 minimum-viable closure (see "Remaining work" below).
 
-The Atlassian MCP server is configured in project `.mcp.json` via `mcp-remote`. The user is approving/promoting the project-level MCP so the server loads at session start in the next session — confirm `mcp__atlassian__*` tools are available via `ToolSearch` before starting Jira work, and if they aren't, run `npx -y mcp-remote https://mcp.atlassian.com/v1/mcp` to re-trigger the OAuth dance against the cached client at `~/.mcp-auth/`.
+The Atlassian MCP server is configured in project `.mcp.json` via `mcp-remote`. The user is promoting the project-level MCP so the server loads at session start — confirm `mcp__atlassian__*` tools are available via `ToolSearch` before starting Jira work, and if they aren't, run `npx -y mcp-remote https://mcp.atlassian.com/v1/mcp` to re-trigger the OAuth dance against the cached client at `~/.mcp-auth/`.
 
 ---
 
@@ -26,11 +27,12 @@ The Atlassian MCP server is configured in project `.mcp.json` via `mcp-remote`. 
 
 - Path: `C:\Users\ak\TaskGoblin` (TaskGoblin / VimbusProMax3000, Bun 1.3.13 monorepo).
 - Branch: `main`.
-- Expected: **2 commits ahead** of `origin/main` — verify with `git rev-list --count origin/main..HEAD`.
+- Expected: **3 commits ahead** of `origin/main` — verify with `git rev-list --count origin/main..HEAD`.
 - The unpushed commits, top first:
-  - `dd4aa2f feat(VIM-49): implement dogfood scenario chain (steps 1-2 of 8)` — replaces the all-or-nothing throw with a named step chain (runM2GoldenPath → step1 → step2 → step3 throws "not yet implemented for step 3"). step1CleanDatabase calls GET /health; step2CreateProject calls POST /projects. Adds requestJson/postJson/getJson helpers and a finalizeRun helper that writes manifest.json. 6/6 dogfood tests pass.
-  - `3df9552 fix(VIM-48): drop remaining 20s overrides on test-runner/agent/planner` — same pattern as `177b1eb`: dropped per-test/per-hook `, 20000` overrides on `packages/test-runner/src/index.test.ts` beforeEach, `packages/planner/src/service.test.ts` beforeEach, and `packages/agent/src/execution.test.ts` (beforeEach + 2 test callbacks). Restored an explicit `, 60000` on the heavy `"allows approved command-backed items..."` test in test-runner because under parallel-pool load it can run >30s end-to-end (matches the precedent already at `apps/api/src/executions.execute.test.ts:49` and `app.test.ts:859`). `bun run test:unit` green twice in a row at this commit.
-- Already on `origin/main`, top first: `d12cc48` (this prompt's prior revision), `e5f5eb5` (VIM-49 scaffold), `866b1bc` (doc rollover post-177b1eb), `177b1eb` (VIM-48 timeout follow-up #1), `9ac2ccc` (VIM-48 main implementation).
+  - `c68effb feat(VIM-49): add dogfood-m2 orchestrator (single-command from clean state)` — `scripts/dogfood-m2.ts` brings docker-compose Postgres up, generates Prisma clients, force-resets the schema, prepares a deterministic temp git repo at `/tmp/vimbus-m2-dogfood/<runId>`, spawns the API in Postgres mode, polls `/health`, invokes the CLI, then kills the API and brings docker-compose down in `finally`. `package.json` `dogfood:m2` rewired from the CLI passthrough to this script. Not yet validated against a live environment — that's the first job this session.
+  - `75aebdd feat(VIM-49): implement scenario steps 6-8 - all 8 steps now wired` — step 6 fires verification dispatch via `POST /executions/:id/test-runs`, step 7 decodes `TestRun.evidenceJson` from step 6's response, step 8 creates a benchmark scenario then hydrates a benchmark run from the executionId. `runM2GoldenPath` is now a complete chain returning a passed/failed verdict. 8/8 dogfood unit tests pass with mocked fetch.
+  - `a5247a5 feat(VIM-49): add /tasks/:id/execute/headless route + implement step 5` — new dogfood-only API route in `apps/api/src/app.ts` that prepares the task branch and creates a `TaskExecution` row without invoking the LLM-driven agent loop or resolving a model slot. Production execution still flows through the sibling `POST /tasks/:id/execute`. CLI step 5 calls the new route. Integration test for the route deferred to the next-session pass when the live run validates the full path.
+- Already on `origin/main`, top first: `128fceb` (steps 3-4 + step-5 design call), `0acda2f` (this prompt's prior revision), `dd4aa2f` (steps 1-2 + helper utilities), `3df9552` (VIM-48 follow-up #2), `d12cc48` (prompt revision earlier), `e5f5eb5` (VIM-49 scaffold), `866b1bc` (doc rollover post-177b1eb), `177b1eb` (VIM-48 follow-up #1), `9ac2ccc` (VIM-48 main implementation).
 - Working tree expected clean except `.claude/worktrees/` (operational state, leave alone).
 
 ### Jira state
@@ -70,17 +72,17 @@ Criterion 4 is now met; criterion 2 is partly met after this session's push.
 cd /c/Users/ak/TaskGoblin
 pwd                                       # /c/Users/ak/TaskGoblin
 git status -s                             # only .claude/worktrees/ expected
-git log --oneline -8                      # top: dd4aa2f, 3df9552, d12cc48, e5f5eb5, 866b1bc, 177b1eb, ec94283, 5ac38a5
-git rev-list --count origin/main..HEAD    # expect 2
+git log --oneline -10                     # top: c68effb, 75aebdd, a5247a5, 128fceb, 0acda2f, dd4aa2f, 3df9552, d12cc48, e5f5eb5, 866b1bc
+git rev-list --count origin/main..HEAD    # expect 3
 ```
 
-If the count is 2, ask the user to run **`! git push origin main`** to ship `3df9552` and `dd4aa2f`. The harness blocks `git push origin main` even in auto mode; do not retry the blocked push in a loop.
+If the count is 3, ask the user to run **`! git push origin main`** to ship `a5247a5`, `75aebdd`, and `c68effb`. The harness blocks `git push origin main` even in auto mode; do not retry the blocked push in a loop.
 
 After the push lands, re-confirm:
 
 ```
 git rev-list --count origin/main..HEAD    # expect 0 now
-git ls-remote origin main                 # SHA should match dd4aa2f
+git ls-remote origin main                 # SHA should match c68effb
 ```
 
 If anything else is off (dirty tree, divergent SHA, unexpected commits), pause and surface to the user. Don't transition VIM-48 to Done against a tree that doesn't match what was claimed in the closure comment.
@@ -134,26 +136,31 @@ Post a closure comment via `mcp__atlassian__addCommentToJiraIssue` on VIM-48 wit
 - VIM-51 stays blocked by VIM-49; don't touch.
 - VIM-50 (runbook cleanup) is parallel-safe but needs VIM-49's runbook artifact to write against; don't start it yet.
 
-### 5. Continue VIM-49 — steps 3-8 + orchestrator + bundle
+### 5. VIM-49 — end-to-end validation and remaining work
 
-VIM-49 = **M2 golden-path dogfood harness, minimum viable** (8 pts). The scaffold (`e5f5eb5`) and implementation pass 1 (`dd4aa2f`) have already landed:
-
-- `apps/cli/src/dogfood.ts` — command predicate, argument parsing, artifact-bundle directory creation, manifest writer, summary formatter, named scenario step chain (`runM2GoldenPath`), step 1 (clean DB sanity-check via `GET /health`), step 2 (`POST /projects` with deterministic body), and helper utilities (`requestJson`/`postJson`/`getJson`/`finalizeRun`). Steps 3-8 each have their own function and throw `"VIM-49 step N (...) is not yet implemented"` so the next session knows exactly where to resume.
-- `apps/cli/src/dogfood.test.ts` — 6/6 pass. Tests cover predicate, formatter, dry-run path, DATABASE_URL requirement, and the steps 1-2 happy path with mocked fetch. Add new tests as you implement each step.
-- `apps/cli/src/dogfood-fixtures/index.html` — deterministic minimal fixture page.
-- `apps/cli/src/index.ts` — dispatcher.
-- `package.json` — `"dogfood:m2": "bun --filter @vimbuspromax3000/cli start dogfood"` (no docker-compose orchestration yet — that's part of the work below).
-- `docs/runbooks/m2-golden-path.md` — stub flagged "VIM-49 in progress."
+VIM-49 = **M2 golden-path dogfood harness, minimum viable** (8 pts). All eight scenario steps + the new `POST /tasks/:id/execute/headless` API route + the `scripts/dogfood-m2.ts` orchestrator are committed (locally as of session start; on `origin/main` after step 1 above). The dogfood unit tests cover the HTTP request shape with mocked fetch (8/8 pass), but the orchestrator has **not** yet been run against a live environment.
 
 Read VIM-49 directly from Jira via `mcp__atlassian__getJiraIssue VIM-49 responseContentFormat=markdown` and cross-check against `docs/SPRINT-7-PLAN.md` (the "VIM-47 — M2 golden-path dogfood harness" section — note that the plan body uses pre-create placeholder labels; "VIM-47 in plan body" maps to **VIM-49 in Jira**, per the mapping table at the top of the plan).
 
 Resume work in this order:
 
-1. **Steps 3-8 in `apps/cli/src/dogfood.ts`** — replace each `throw "not yet implemented for step N"` in turn. The surface map embedded in the file header lists the API route and payload shape per step. Pay attention to the open design call called out in the file header: **step 5 (execute task) triggers the LLM-driven agent loop and needs either a stub model in the registry or a direct test-run dispatch path that bypasses the agent loop.** Decide between those two before writing step 5 — the choice shapes the deterministic-seed contract.
-2. **Orchestrator script** at `scripts/dogfood-m2.ts` (analogous to `scripts/test-postgres.ts`): docker-compose `postgres` up → `prisma db push --schema .generated/schema.postgres.prisma` → spawn API server in Postgres mode → wait for health → invoke `bun apps/cli/src/index.ts dogfood --api-url ... --database-url ...` → docker-compose down. Then update root `package.json` `"dogfood:m2"` to `"bun scripts/dogfood-m2.ts"`.
-3. **Artifact-bundle population** — extend `dogfood.ts` to write planner-payload.json, agent-step-log.jsonl, mcp-tool-call-log.jsonl, screenshots/, axe-results.json, evidence.json, benchmark-run.json (layout already documented in the runbook stub).
-4. **Idempotency proof** in `dogfood.test.ts`: run twice against a clean state, assert the bundle contents are identical modulo timestamps and run IDs.
-5. **Fill in the runbook** — replace the "filled in when VIM-49 lands" sections with concrete step-by-step inspection guidance.
+1. **End-to-end validation of the orchestrator.** Run `bun run dogfood:m2` against a clean Docker state. Expect issues — this is the first time the orchestrator hits real infra. Likely surfaces:
+   - The API spawn command (`bun --filter @vimbuspromax3000/api dev`) may not actually be `dev`; confirm against `apps/api/package.json` and adjust `scripts/dogfood-m2.ts` step e if needed.
+   - `prisma db push --force-reset --accept-data-loss` syntax: confirm against the Prisma 7.8.0 docs; the current invocation should work but verify.
+   - The temp git repo prep in step d may need adjustment if `prepareTaskBranch` (called from `/headless`) expects something specific in the working tree.
+   - The test-runner's a11y dispatch (step 6) needs Chromium available to Playwright. If not installed, expect a clear error from the test-runner and either install Chromium or skip a11y dispatch in the dogfood path (whichever is cheaper).
+   - The /headless route does git work (`prepareTaskBranch`); the temp repo's `main` branch must already exist.
+2. **API integration test** for `POST /tasks/:id/execute/headless` in `apps/api/src/app.test.ts`. Pattern to follow: the existing tests use `seedExecutableTask` to set up an approved task on isolated prisma + initialized git repo, then call `api.fetch(new Request(...))`. Assert that the response is 201, the TaskExecution row exists, and no agent-loop side effects (no AgentStep row, no ModelDecision row).
+3. **Artifact-bundle population.** Currently the bundle only contains `manifest.json`. Extend `apps/cli/src/dogfood.ts` (in `runM2GoldenPath`, after step 8 returns) to write:
+   - `planner-payload.json` — the `buildDeterministicPlannerPayload` return value, captured before the POST in step 3.
+   - `agent-step-log.jsonl` — one JSON object per line, fetched via a new GET endpoint or via `/events/history?taskExecutionId=…` filtered to `agent.step.*` types.
+   - `mcp-tool-call-log.jsonl` — fetched via `GET /executions/:id/mcp/calls` (or whatever the canonical route is; verify against `apps/api/src/app.ts`).
+   - `screenshots/` — copy from `.artifacts/executions/<executionId>/browser/...` (where the test-runner writes them per VIM-39).
+   - `axe-results.json` — extract from the a11y `TestRun.evidenceJson` already decoded in step 7.
+   - `evidence.json` — dump of all `TestRun.evidenceJson` payloads for the execution.
+   - `benchmark-run.json` — the `{ run, evalRun }` object from step 8.
+4. **Idempotency proof** in `apps/cli/src/dogfood.test.ts`: a fresh test that mocks fetch to return identical payloads twice (with `runId` differing across runs), runs the dogfood twice, asserts the bundle contents are byte-identical modulo `runId` and the timestamp fields in `manifest.json`.
+5. **Fill in the runbook** at `docs/runbooks/m2-golden-path.md` — replace the "filled in when VIM-49 lands" sections with concrete step-by-step inspection guidance for each artifact in the bundle. Document the prerequisites (Docker, Bun, optional Chromium for a11y dispatch). Document the troubleshooting list discovered during step 1's end-to-end validation.
 
 Acceptance criteria summary (read the canonical version from Jira; this is a sketch):
 
