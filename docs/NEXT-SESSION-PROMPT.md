@@ -1,16 +1,16 @@
-# Next Session — Finish VIM-48 Jira hygiene, then start VIM-49
+# Next Session — VIM-48 Jira hygiene, then VIM-49 scenario implementation
 
-_Drafted 2026-04-28 after VIM-48 was implemented (SHA `9ac2ccc`). Updated 2026-04-29 after the follow-up timeout fix `177b1eb` and both commits landed on `origin/main`. Supersedes the prior Sprint 7 kickoff version of this file (preserved in git history at commit `eb8e371`)._
+_Drafted 2026-04-28 after VIM-48 was implemented (SHA `9ac2ccc`). Updated 2026-04-29 (a) after the follow-up `177b1eb` landed on `origin/main`, then (b) after VIM-49 was scaffolded locally as `e5f5eb5`. Supersedes the prior Sprint 7 kickoff version of this file (preserved in git history at commit `eb8e371`)._
 
 ---
 
 ## TL;DR
 
-VIM-48 (test matrix + flake hardening) is **implementation-done, verified, and pushed**. The Jira ticket is still in **To Do** because the Atlassian MCP tools weren't loaded in the prior sessions. Your job this session, in order:
+VIM-48 (test matrix + flake hardening) is **implementation-done, verified, and pushed**. VIM-49 (M2 golden-path dogfood harness) has its **scaffold committed locally** as `e5f5eb5` (CLI command shell, fixture HTML, runbook stub, dispatcher wiring, root `dogfood:m2` script entry — all step bodies stubbed). Two commits are ahead of `origin/main` and need pushing. The VIM-48 Jira ticket is still in **To Do** because the Atlassian MCP tools weren't loaded in the prior sessions. Your job this session, in order:
 
-1. Verify `9ac2ccc` and the follow-up `177b1eb` are on `origin/main` (sanity check; expect 0 commits ahead).
+1. Push the local commits (`866b1bc` doc rollover and `e5f5eb5` VIM-49 scaffold) to `origin/main`.
 2. Run VIM-48 through To Do → In Progress → In Review → Done in Jira, post the closure comment, and confirm VIM-49 is now unblocked (VIM-48 was its only blocker).
-3. Start VIM-49 (M2 golden-path dogfood harness, 8 pts).
+3. Continue VIM-49 — the **implementation pass** that fills in the eight scenario step bodies + the docker-compose / API-server orchestrator at `scripts/dogfood-m2.ts`.
 
 The Atlassian MCP server is configured in project `.mcp.json` via `mcp-remote`. If it isn't loaded automatically at session start, approve / re-authenticate it before doing the Jira work.
 
@@ -22,9 +22,13 @@ The Atlassian MCP server is configured in project `.mcp.json` via `mcp-remote`. 
 
 - Path: `C:\Users\ak\TaskGoblin` (TaskGoblin / VimbusProMax3000, Bun 1.3.13 monorepo).
 - Branch: `main`.
-- Expected: **0 commits ahead** of `origin/main` — verify with `git rev-list --count origin/main..HEAD`.
-- The current top of `main` should be `177b1eb fix(VIM-48): drop tight 20s overrides on parallel-pool API tests`, with `9ac2ccc fix(VIM-48): stratify test matrix and harden carry-over flakes for M2` immediately below. If the top SHA differs, something has shifted — surface that to the user before doing Jira hygiene.
-- The follow-up `177b1eb` removed per-test 20000ms overrides on four `apps/api/src/app.test.ts` tests (branch lifecycle, execution start, patch reject, verification command failure). They were tighter than the 30s global from `vitest.config.ts` and tripped under parallel-pool contention on Windows after the template-DB speedup; removing them restored deterministic green.
+- Expected: **2 commits ahead** of `origin/main` — verify with `git rev-list --count origin/main..HEAD`.
+- The unpushed commits, top first:
+  - `e5f5eb5 feat(VIM-49): scaffold M2 dogfood harness CLI command` — adds `apps/cli/src/dogfood.ts`, `apps/cli/src/dogfood.test.ts`, `apps/cli/src/dogfood-fixtures/index.html`, runbook stub, dispatcher wiring, root script entry. Step bodies stubbed; the scenario throws "not yet implemented" without `--dry-run`. 5/5 dogfood tests pass; full unit suite green at this SHA (62 files, 476 pass, 2 skip, 0 fail).
+  - `866b1bc docs: roll next-session prompt and Sprint 7 plan to post-177b1eb state` — doc rollover.
+- Just below `origin/main`:
+  - `177b1eb fix(VIM-48): drop tight 20s overrides on parallel-pool API tests` — VIM-48 follow-up. Removed per-test 20000ms overrides on four `apps/api/src/app.test.ts` tests (branch lifecycle, execution start, patch reject, verification command failure) which were tighter than the 30s global from `vitest.config.ts` and tripped under parallel-pool contention on Windows after the template-DB speedup.
+  - `9ac2ccc fix(VIM-48): stratify test matrix and harden carry-over flakes for M2` — VIM-48 main implementation.
 - Working tree expected clean except `.claude/worktrees/` (operational state, leave alone).
 
 ### Jira state
@@ -64,12 +68,20 @@ Criterion 4 is now met; criterion 2 is partly met after this session's push.
 cd /c/Users/ak/TaskGoblin
 pwd                                       # /c/Users/ak/TaskGoblin
 git status -s                             # only .claude/worktrees/ expected
-git log --oneline -5                      # top should be 177b1eb, then 5ac38a5, 9ac2ccc, ...
-git rev-list --count origin/main..HEAD    # expect 0
-git ls-remote origin main                 # SHA should match local main
+git log --oneline -7                      # top: e5f5eb5, 866b1bc, 177b1eb, ec94283, 5ac38a5, 9ac2ccc, eb8e371
+git rev-list --count origin/main..HEAD    # expect 2
 ```
 
-If anything is off (commits ahead, dirty tree, divergent SHA on origin), pause and surface it to the user. Don't transition Jira against a tree that doesn't match what was claimed.
+If the count is 2, ask the user to run **`! git push origin main`** to ship `866b1bc` and `e5f5eb5`. The harness blocks `git push origin main` even in auto mode; do not retry the blocked push in a loop.
+
+After the push lands, re-confirm:
+
+```
+git rev-list --count origin/main..HEAD    # expect 0 now
+git ls-remote origin main                 # SHA should match e5f5eb5
+```
+
+If anything else is off (dirty tree, divergent SHA, unexpected commits), pause and surface to the user. Don't transition VIM-48 to Done against a tree that doesn't match what was claimed in the closure comment.
 
 ### 2. Verify the work before flipping VIM-48 to Done
 
@@ -119,9 +131,26 @@ Post a closure comment via `mcp__atlassian__addCommentToJiraIssue` on VIM-48 wit
 - VIM-51 stays blocked by VIM-49; don't touch.
 - VIM-50 (runbook cleanup) is parallel-safe but needs VIM-49's runbook artifact to write against; don't start it yet.
 
-### 5. Start VIM-49
+### 5. Continue VIM-49 — implementation pass
 
-VIM-49 = **M2 golden-path dogfood harness, minimum viable** (8 pts). Read it directly from Jira via `mcp__atlassian__getJiraIssue VIM-49 responseContentFormat=markdown` and cross-check against `docs/SPRINT-7-PLAN.md` (the "VIM-47 — M2 golden-path dogfood harness" section — note that the plan body uses pre-create placeholder labels; "VIM-47 in plan body" maps to **VIM-49 in Jira**, per the mapping table at the top of the plan).
+VIM-49 = **M2 golden-path dogfood harness, minimum viable** (8 pts). The scaffold (`e5f5eb5`) has already landed:
+
+- `apps/cli/src/dogfood.ts` — command predicate, argument parsing, artifact-bundle directory creation, manifest writer, summary formatter. The eight scenario steps are documented in the file header with file/symbol pointers from the surface map. `--dry-run` exercises the scaffold; without `--dry-run` it throws "VIM-49 dogfood scenario is not yet implemented."
+- `apps/cli/src/dogfood.test.ts` — 5/5 pass.
+- `apps/cli/src/dogfood-fixtures/index.html` — deterministic minimal fixture page.
+- `apps/cli/src/index.ts` — dispatcher.
+- `package.json` — `"dogfood:m2": "bun --filter @vimbuspromax3000/cli start dogfood"` (no docker-compose orchestration yet).
+- `docs/runbooks/m2-golden-path.md` — stub flagged "VIM-49 in progress."
+
+So the next-session work is the **implementation pass**, not a fresh start. Read VIM-49 directly from Jira via `mcp__atlassian__getJiraIssue VIM-49 responseContentFormat=markdown` and cross-check against `docs/SPRINT-7-PLAN.md` (the "VIM-47 — M2 golden-path dogfood harness" section — note that the plan body uses pre-create placeholder labels; "VIM-47 in plan body" maps to **VIM-49 in Jira**, per the mapping table at the top of the plan).
+
+The implementation pass produces, in this order:
+
+1. **Eight scenario step functions** in `apps/cli/src/dogfood.ts`, replacing the `throw "not yet implemented"`. Each step calls the API route or DB query named in the surface map embedded in the file header; the surface map is the file/symbol manifest the prior session produced.
+2. **Orchestrator script** at `scripts/dogfood-m2.ts` (analogous to `scripts/test-postgres.ts`): docker-compose `postgres` up → `prisma db push --schema .generated/schema.postgres.prisma` → spawn API server in Postgres mode → wait for health → invoke `bun apps/cli/src/index.ts dogfood --api-url ... --database-url ...` → docker-compose down. Then update root `package.json` `"dogfood:m2"` to `"bun scripts/dogfood-m2.ts"`.
+3. **Artifact-bundle population** — extend `dogfood.ts` to write planner-payload.json, agent-step-log.jsonl, mcp-tool-call-log.jsonl, screenshots/, axe-results.json, evidence.json, benchmark-run.json (layout already documented in the runbook stub).
+4. **Idempotency proof** in `dogfood.test.ts`: run twice against a clean state, assert the bundle contents are identical modulo timestamps and run IDs.
+5. **Fill in the runbook** — replace the "filled in when VIM-49 lands" sections with concrete step-by-step inspection guidance.
 
 Acceptance criteria summary (read the canonical version from Jira; this is a sketch):
 
