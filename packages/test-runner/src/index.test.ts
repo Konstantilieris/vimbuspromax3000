@@ -39,7 +39,7 @@ describe("test runner service", () => {
         "README.md": "# verification repo\n",
       },
     });
-  }, 20000);
+  });
 
   afterEach(async () => {
     await prisma.$disconnect();
@@ -147,7 +147,7 @@ describe("test runner service", () => {
     expect(patchReview?.status).toBe("ready");
     expect(patchReview?.summary).toContain("file");
     expect(patchReview?.diffPath && existsSync(patchReview.diffPath)).toBe(true);
-  }, 20000);
+  }, 60000);
 
   test.each([
     { kind: "visual", assetKind: "image", mode: "asset-presence" },

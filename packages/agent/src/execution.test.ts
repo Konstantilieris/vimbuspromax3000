@@ -31,7 +31,7 @@ describe("execution service", () => {
         "README.md": "# temp repo\n",
       },
     });
-  }, 20000);
+  });
 
   afterEach(async () => {
     await prisma.$disconnect();
@@ -51,7 +51,7 @@ describe("execution service", () => {
     expect(firstBranch?.name).toBe("tg/api/TASK-EXEC-1-persist-execution-state");
     expect(secondBranch?.id).toBe(firstBranch?.id);
     expect(runCommand("git", ["branch", "--show-current"], tempDir).stdout.trim()).toBe(firstBranch?.name);
-  }, 20000);
+  });
 
   test("blocks branch preparation when the worktree is dirty", async () => {
     const { task } = await seedReadyTask(prisma, tempDir);
@@ -112,7 +112,7 @@ describe("execution service", () => {
     });
     expect(decisions).toHaveLength(1);
     expect(decisions[0]?.selectedModel).toBe("openai:gpt-test");
-  }, 20000);
+  });
 });
 
 async function seedReadyTask(

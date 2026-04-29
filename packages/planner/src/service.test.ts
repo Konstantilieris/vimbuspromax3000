@@ -114,7 +114,7 @@ describe("createPlannerService.generateAndPersist", () => {
     const isolated = await createIsolatedPrisma("vimbus-planner-svc-");
     prisma = isolated.prisma;
     tempDir = isolated.tempDir;
-  }, 20000);
+  });
 
   afterEach(async () => {
     await prisma.$disconnect();
