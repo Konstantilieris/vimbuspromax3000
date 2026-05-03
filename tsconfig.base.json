@@ -11,6 +11,7 @@
     "ignoreDeprecations": "6.0",
     "paths": {
       "@vimbuspromax3000/agent": ["packages/agent/src/index.ts"],
+      "@vimbuspromax3000/api-client": ["packages/api-client/src/index.ts"],
       "@vimbuspromax3000/benchmarks": ["packages/benchmarks/src/index.ts"],
       "@vimbuspromax3000/evaluator": ["packages/evaluator/src/index.ts"],
       "@vimbuspromax3000/db": ["packages/db/src/index.ts"],

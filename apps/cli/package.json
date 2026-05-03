@@ -8,6 +8,8 @@
   },
   "dependencies": {
     "@opentui/core": "0.1.102",
+    "@opentui/core-win32-x64": "0.1.102",
+    "@vimbuspromax3000/api-client": "workspace:*",
     "@vimbuspromax3000/mcp-client": "workspace:*",
     "@vimbuspromax3000/model-registry": "workspace:*",
     "@vimbuspromax3000/shared": "workspace:*"

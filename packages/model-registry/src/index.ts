@@ -17,6 +17,7 @@ import {
 
 // Aggregated re-export for credential helpers used by HC-95/HC-96 onboarding flow.
 export * from "./claudeCredentials";
+export * from "./claudeCliDetect";
 
 export type CreateSecretRefInput = {
   projectId: string;

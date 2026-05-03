@@ -21,6 +21,10 @@ export default defineConfig({
         replacement: fileURLToPath(new URL("./packages/agent/src/index.ts", import.meta.url)),
       },
       {
+        find: "@vimbuspromax3000/api-client",
+        replacement: fileURLToPath(new URL("./packages/api-client/src/index.ts", import.meta.url)),
+      },
+      {
         find: "@vimbuspromax3000/benchmarks",
         replacement: fileURLToPath(new URL("./packages/benchmarks/src/index.ts", import.meta.url)),
       },

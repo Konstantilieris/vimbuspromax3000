@@ -35,6 +35,8 @@
       "version": "0.1.0",
       "dependencies": {
         "@opentui/core": "0.1.102",
+        "@opentui/core-win32-x64": "0.1.102",
+        "@vimbuspromax3000/api-client": "workspace:*",
         "@vimbuspromax3000/mcp-client": "workspace:*",
         "@vimbuspromax3000/model-registry": "workspace:*",
         "@vimbuspromax3000/shared": "workspace:*",
@@ -53,6 +55,14 @@
         "@vimbuspromax3000/policy-engine": "workspace:*",
         "@vimbuspromax3000/shared": "workspace:*",
         "ai": "^6.0.168",
+      },
+    },
+    "packages/api-client": {
+      "name": "@vimbuspromax3000/api-client",
+      "version": "0.1.0",
+      "dependencies": {
+        "@vimbuspromax3000/model-registry": "workspace:*",
+        "@vimbuspromax3000/shared": "workspace:*",
       },
     },
     "packages/benchmarks": {
@@ -417,6 +427,8 @@
     "@vimbuspromax3000/agent": ["@vimbuspromax3000/agent@workspace:packages/agent"],
 
     "@vimbuspromax3000/api": ["@vimbuspromax3000/api@workspace:apps/api"],
+
+    "@vimbuspromax3000/api-client": ["@vimbuspromax3000/api-client@workspace:packages/api-client"],
 
     "@vimbuspromax3000/benchmarks": ["@vimbuspromax3000/benchmarks@workspace:packages/benchmarks"],
 
