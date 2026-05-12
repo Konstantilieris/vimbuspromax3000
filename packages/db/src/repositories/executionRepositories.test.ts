@@ -18,6 +18,7 @@ import {
   listTaskExecutions,
   listTasks,
   listTestRuns,
+  normalizeProjectRootPath,
   persistPlannerProposal,
   updatePatchReview,
   updateTaskBranch,
@@ -44,7 +45,7 @@ describe("execution repositories", () => {
     const { project, task } = await seedReadyTask(prisma, tempDir);
     const taskContext = await getTaskExecutionContext(prisma, task.id);
 
-    expect(taskContext?.epic.project.rootPath).toBe(tempDir);
+    expect(taskContext?.epic.project.rootPath).toBe(normalizeProjectRootPath(tempDir));
     expect(taskContext?.latestVerificationPlan?.status).toBe("approved");
 
     const branch = await createTaskBranch(prisma, {

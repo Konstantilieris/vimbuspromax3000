@@ -427,6 +427,99 @@ describe("test runner service", () => {
     expect(testRuns[0]?.verificationItem?.kind).toBe("visual");
   });
 
+  test("runs approved Playwright validations with generated test files", async () => {
+    const env = {
+      VIMBUS_TEST_KEY: "present",
+    };
+    const seenCommands: string[] = [];
+    const testFilePath = "tests/generated/TASK-TEST-1/login.spec.ts";
+    const { project, task } = await seedReadyTask(prisma, tempDir, {
+      items: [
+        {
+          kind: "manual",
+          runner: "playwright",
+          title: "generated login validation",
+          description: "runs the approved generated Playwright file",
+          command: null,
+        },
+      ],
+    });
+    const item = await getOnlyVerificationItem(prisma, task.id);
+    await prisma.validation.updateMany({
+      where: {
+        taskId: task.id,
+        verificationItemId: item.id,
+      },
+      data: {
+        testType: "playwright",
+        status: "approved",
+        testFilePath,
+      },
+    });
+    const { execution, testRunnerService } = await startExecutionForTask(prisma, project.id, task.id, env, {
+      commandRunner: createStubCommandRunner(tempDir, seenCommands),
+    });
+
+    const testRuns = await testRunnerService.runExecutionVerification({
+      executionId: execution.id,
+    });
+    const validation = await prisma.validation.findFirst({
+      where: {
+        taskId: task.id,
+        verificationItemId: item.id,
+      },
+    });
+
+    expect(seenCommands).toEqual([`bunx playwright test ${testFilePath}`]);
+    expect(testRuns).toHaveLength(1);
+    expect(testRuns[0]?.command).toBe(`bunx playwright test ${testFilePath}`);
+    expect(testRuns[0]?.verificationItemId).toBe(item.id);
+    expect(validation?.status).toBe("passed");
+    expect(validation?.lastTestRunId).toBe(testRuns[0]?.id);
+  });
+
+  test("does not duplicate execution when a Playwright validation references a command-backed item", async () => {
+    const env = {
+      VIMBUS_TEST_KEY: "present",
+    };
+    const seenCommands: string[] = [];
+    const legacyCommand = "pnpm playwright test tests/login.spec.ts";
+    const { project, task } = await seedReadyTask(prisma, tempDir, {
+      items: [
+        {
+          kind: "visual",
+          runner: "playwright",
+          title: "legacy login validation",
+          description: "runs the existing Playwright command",
+          command: legacyCommand,
+        },
+      ],
+    });
+    const item = await getOnlyVerificationItem(prisma, task.id);
+    await prisma.validation.updateMany({
+      where: {
+        taskId: task.id,
+        verificationItemId: item.id,
+      },
+      data: {
+        testType: "playwright",
+        status: "approved",
+        testFilePath: "tests/generated/TASK-TEST-1/login.spec.ts",
+      },
+    });
+    const { execution, testRunnerService } = await startExecutionForTask(prisma, project.id, task.id, env, {
+      commandRunner: createStubCommandRunner(tempDir, seenCommands),
+    });
+
+    const testRuns = await testRunnerService.runExecutionVerification({
+      executionId: execution.id,
+    });
+
+    expect(seenCommands).toEqual([legacyCommand]);
+    expect(testRuns).toHaveLength(1);
+    expect(testRuns[0]?.command).toBe(legacyCommand);
+  });
+
   test("runs a11y items through the browser runner and stores axe evidence on the test run", async () => {
     const env = {
       VIMBUS_TEST_KEY: "present",

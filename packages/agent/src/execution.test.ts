@@ -15,7 +15,11 @@ import {
   writeProjectFile,
 } from "@vimbuspromax3000/db/testing";
 import { setupModelRegistry } from "@vimbuspromax3000/model-registry";
-import { createExecutionService } from "./index";
+import {
+  assertValidationAwareExecutionGate,
+  createExecutionService,
+  ValidationGateError,
+} from "./index";
 
 describe("execution service", () => {
   let prisma: PrismaClient;
@@ -112,6 +116,94 @@ describe("execution service", () => {
     });
     expect(decisions).toHaveLength(1);
     expect(decisions[0]?.selectedModel).toBe("openai:gpt-test");
+  });
+
+  test("validation-aware gate accepts approved validations without a legacy verification plan", () => {
+    expect(() =>
+      assertValidationAwareExecutionGate({
+        taskId: "task_validation_ready",
+        latestVerificationPlan: null,
+        validations: [
+          {
+            id: "validation_1",
+            title: "generated Playwright spec",
+            status: "approved",
+            orderIndex: 0,
+          },
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  test("validation-aware gate rejects unapproved validations with serializable details", () => {
+    let error: unknown;
+
+    try {
+      assertValidationAwareExecutionGate({
+        taskId: "task_validation_pending",
+        latestVerificationPlan: { status: "approved" },
+        validations: [
+          {
+            id: "validation_1",
+            title: "generated Playwright spec",
+            status: "approved",
+            orderIndex: 0,
+          },
+          {
+            id: "validation_2",
+            title: "checkout accessibility",
+            status: "proposed",
+            orderIndex: 1,
+          },
+        ],
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(ValidationGateError);
+    expect((error as ValidationGateError).toJSON()).toMatchObject({
+      code: "VALIDATION_GATE_FAILED",
+      status: 412,
+      taskId: "task_validation_pending",
+      reason: "validations_not_approved",
+      unapprovedValidations: [
+        {
+          id: "validation_2",
+          title: "checkout accessibility",
+          status: "proposed",
+          orderIndex: 1,
+        },
+      ],
+    });
+  });
+
+  test("validation-aware gate falls back to legacy approved verification plan when no validations exist", () => {
+    expect(() =>
+      assertValidationAwareExecutionGate({
+        taskId: "task_legacy_ready",
+        latestVerificationPlan: { status: "approved" },
+        validations: [],
+      }),
+    ).not.toThrow();
+  });
+
+  test("validation-aware gate rejects missing or unapproved legacy verification plans when no validations exist", () => {
+    expect(() =>
+      assertValidationAwareExecutionGate({
+        taskId: "task_legacy_pending",
+        latestVerificationPlan: { status: "proposed" },
+        validations: [],
+      }),
+    ).toThrow("approved verification plan");
+
+    expect(() =>
+      assertValidationAwareExecutionGate({
+        taskId: "task_legacy_missing",
+        latestVerificationPlan: null,
+        validations: [],
+      }),
+    ).toThrow("approved verification plan");
   });
 });
 

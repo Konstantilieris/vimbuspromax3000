@@ -1,6 +1,8 @@
 import { DASHBOARD_COLUMNS, getDashboardSnapshot } from "./dashboard";
+import { DESIGN_COMMANDS } from "./design";
 import { MODEL_COMMANDS, getModelsViewSnapshot, runModelsCommand } from "./models";
 import { PLANNER_COMMANDS, runPlannerCommand } from "./planner";
+import { REVIEW_COMMANDS } from "./review";
 
 describe("CLI dashboard placeholder", () => {
   test("contains the documented bootstrap columns", () => {
@@ -15,6 +17,14 @@ describe("CLI dashboard placeholder", () => {
     }
 
     for (const command of PLANNER_COMMANDS) {
+      expect(snapshot).toContain(command);
+    }
+
+    for (const command of DESIGN_COMMANDS) {
+      expect(snapshot).toContain(command);
+    }
+
+    for (const command of REVIEW_COMMANDS) {
       expect(snapshot).toContain(command);
     }
   });
@@ -143,6 +153,13 @@ describe("CLI dashboard placeholder", () => {
           taskCount: 0,
           verificationPlanCount: 0,
         },
+        reviewArtifact: undefined as
+          | undefined
+          | {
+              id: string;
+              status: string;
+              title: string;
+            },
         epics: [] as Array<{
           key: string;
           title: string;
@@ -197,6 +214,11 @@ describe("CLI dashboard placeholder", () => {
           epicCount: 1,
           taskCount: 1,
           verificationPlanCount: 1,
+        };
+        state.plannerRun.reviewArtifact = {
+          id: "review_1",
+          status: "pending",
+          title: "Plan review: Implement planner slice",
         };
         state.plannerRun.epics = [
           {
@@ -301,6 +323,7 @@ describe("CLI dashboard placeholder", () => {
     expect(plannerOutput).toContain("Started planner run planner_1");
     expect(answerOutput).toContain("Interview Keys: scope, verification");
     expect(generateOutput).toContain("Status: generated");
+    expect(generateOutput).toContain("Review: pending http://localhost:3000/review/review_1");
     expect(generateOutput).toContain("Persist planner proposal");
     expect(approvalOutput).toContain("Recorded granted planner approval");
     expect(taskOutput).toContain("awaiting_verification_approval");

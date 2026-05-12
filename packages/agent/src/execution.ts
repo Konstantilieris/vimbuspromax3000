@@ -39,6 +39,7 @@ import {
   type AgentLoopResult,
   type ToolDef,
 } from "./agentLoop";
+import { ValidationGateError, type ValidationGateValidation } from "./errors";
 
 /**
  * VIM-30 — typed payload returned by {@link ExecutionService.retryExecution}.
@@ -213,6 +214,41 @@ export type AgentGeneratorContext = {
 export type CreateAgentGenerator = (
   context: AgentGeneratorContext,
 ) => AgentGenerator | Promise<AgentGenerator>;
+
+export type ValidationAwareExecutionGateInput = {
+  taskId: string;
+  latestVerificationPlan?: { status: string } | null;
+  validations?: readonly ValidationGateValidation[];
+};
+
+export function assertValidationAwareExecutionGate(input: ValidationAwareExecutionGateInput) {
+  const validations = input.validations ?? [];
+
+  if (validations.length > 0) {
+    const unapprovedValidations = validations.filter((validation) => validation.status !== "approved");
+
+    if (unapprovedValidations.length > 0) {
+      throw new ValidationGateError({
+        taskId: input.taskId,
+        reason: "validations_not_approved",
+        message: `Task ${input.taskId} must have all validations approved before execution.`,
+        validations,
+        unapprovedValidations,
+      });
+    }
+
+    return;
+  }
+
+  if (input.latestVerificationPlan?.status !== "approved") {
+    throw new ValidationGateError({
+      taskId: input.taskId,
+      reason: "legacy_verification_plan_not_approved",
+      message: `Task ${input.taskId} must have an approved verification plan before execution.`,
+      legacyVerificationPlanStatus: input.latestVerificationPlan?.status ?? null,
+    });
+  }
+}
 
 export function createExecutionService(options: {
   prisma: PrismaClient;
@@ -1320,6 +1356,10 @@ function asString(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+function asNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function parseJsonOrNull(value: string | null) {
   if (!value) {
     return null;
@@ -1342,15 +1382,68 @@ async function requireReadyTaskContext(prisma: PrismaClient, taskId: string) {
     throw new Error(`Task ${taskId} was not found.`);
   }
 
+  const validations = await listValidationGateValidations(prisma, context.id);
+  assertValidationAwareExecutionGate({
+    taskId: context.id,
+    latestVerificationPlan: context.latestVerificationPlan,
+    validations,
+  });
+
   if (context.status !== "ready") {
     throw new Error(`Task ${taskId} must be ready before branch preparation or execution.`);
   }
 
-  if (!context.latestVerificationPlan || context.latestVerificationPlan.status !== "approved") {
-    throw new Error(`Task ${taskId} must have an approved verification plan before execution.`);
+  return context;
+}
+
+async function listValidationGateValidations(
+  prisma: PrismaClient,
+  taskId: string,
+): Promise<ValidationGateValidation[]> {
+  const validationDelegate = (prisma as unknown as {
+    validation?: {
+      findMany?: (args: { where: { taskId: string } }) => Promise<unknown[]>;
+    };
+  }).validation;
+
+  if (!validationDelegate || typeof validationDelegate.findMany !== "function") {
+    return [];
   }
 
-  return context;
+  const validations = await validationDelegate.findMany({
+    where: { taskId },
+  });
+
+  return validations.map(normalizeValidationGateValidation).sort(compareValidationGateValidations);
+}
+
+function normalizeValidationGateValidation(value: unknown): ValidationGateValidation {
+  const record = asRecord(value);
+  const id = asString(record.id) ?? "unknown";
+  const title = asString(record.title);
+  const status = asString(record.status) ?? "unknown";
+  const orderIndex = asNumber(record.orderIndex);
+
+  return {
+    id,
+    title,
+    status,
+    orderIndex,
+  };
+}
+
+function compareValidationGateValidations(
+  left: ValidationGateValidation,
+  right: ValidationGateValidation,
+) {
+  const leftOrder = left.orderIndex ?? Number.MAX_SAFE_INTEGER;
+  const rightOrder = right.orderIndex ?? Number.MAX_SAFE_INTEGER;
+
+  if (leftOrder !== rightOrder) {
+    return leftOrder - rightOrder;
+  }
+
+  return left.id.localeCompare(right.id);
 }
 
 async function getRequiredExecutionWithPatch(prisma: PrismaClient, executionId: string) {

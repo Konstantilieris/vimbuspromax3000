@@ -168,6 +168,75 @@ describe("CLI execution console", () => {
     expect(EXECUTION_COMMANDS).toContain("/events");
   });
 
+  test("/execution:start accepts a positional task id", async () => {
+    const requests: Array<{ method: string; url: string }> = [];
+    const mockFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({
+        method: init?.method ?? "GET",
+        url: String(input),
+      });
+
+      return Response.json(
+        {
+          id: "exec_1",
+          taskId: "task_1",
+          status: "running",
+          branchName: "tg/core/task_1-impl",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        { status: 201 },
+      );
+    };
+
+    const output = await runExecutionCommand(["/execution:start", "task_1"], {
+      fetch: mockFetch as typeof fetch,
+    });
+
+    expect(output).toContain("Execution: exec_1");
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        url: "http://localhost:3000/tasks/task_1/execute",
+      },
+    ]);
+  });
+
+  test("/execution:start formats validation gate failures", async () => {
+    const mockFetch = async () =>
+      Response.json(
+        {
+          code: "VALIDATION_GATE_FAILED",
+          message: "Task task_1 must have all validations approved before execution.",
+          taskId: "task_1",
+          reason: "validations_not_approved",
+          unapprovedValidations: [
+            {
+              id: "validation_1",
+              title: "checkout accessibility",
+              status: "proposed",
+              orderIndex: 0,
+            },
+          ],
+        },
+        { status: 412 },
+      );
+
+    await expect(
+      runExecutionCommand(["/execution:start", "task_1"], {
+        fetch: mockFetch as typeof fetch,
+      }),
+    ).rejects.toThrow(
+      [
+        "Validation gate failed (API 412).",
+        "Task: task_1",
+        "Reason: validations_not_approved",
+        "Message: Task task_1 must have all validations approved before execution.",
+        "Unapproved validations:",
+        "- proposed checkout accessibility (validation_1)",
+      ].join("\n"),
+    );
+  });
+
   test("runs the execution smoke flow through API-backed commands", async () => {
     const requests: Array<{ method: string; url: string; body?: unknown }> = [];
 

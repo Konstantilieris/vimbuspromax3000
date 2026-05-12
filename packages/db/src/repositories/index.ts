@@ -11,6 +11,8 @@ export * from "./patchReviewRepository";
 export * from "./mcpRepository";
 export * from "./sourceAssetRepository";
 export * from "./visualVerificationRepository";
+export * from "./reviewArtifactRepository";
+export * from "./validationRepository";
 export * from "./evaluationRepository";
 export * from "./benchmarkRepository";
 export * from "./langSmithRepository";

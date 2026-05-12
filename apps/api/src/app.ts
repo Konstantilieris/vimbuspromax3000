@@ -1,11 +1,15 @@
+import { existsSync, readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import {
   createExecutionService,
   createVercelAiSdkAgentGeneratorFactory,
+  generatePlaywrightSpec,
   RetryExecutionError,
+  ValidationGateError,
   type CreateAgentGenerator,
   type ExecutionService,
+  type GeneratePlaywrightSpecDeps,
 } from "@vimbuspromax3000/agent";
 import {
   compareRegressionBaseline,
@@ -20,6 +24,7 @@ import {
 } from "@vimbuspromax3000/benchmarks";
 import {
   appendLoopEvent,
+  approveValidation,
   approveVerificationPlan,
   approveSourceAsset,
   createApprovalDecision,
@@ -31,17 +36,23 @@ import {
   createPlannerRun,
   createProject,
   createPrismaClient,
+  createReviewArtifact,
+  createValidation,
   createRegressionBaseline,
+  decideReviewArtifact,
   getActiveRegressionBaseline,
   getBenchmarkScenario,
   getDefaultLoopEventBus,
   getEvalRun,
   getMcpToolCallDetail,
+  getProjectById,
   getSourceAsset,
   getPlannerRunDetail,
+  getReviewArtifact,
   getTaskDetail,
   getTaskExecutionDetail,
   getTaskVerificationReview,
+  getValidation,
   listBenchmarkScenarios,
   listApprovals,
   listLangSmithTraceLinks,
@@ -50,15 +61,19 @@ import {
   listMcpToolCalls,
   listMcpToolCallsForExecution,
   listProjects,
+  findProjectByRootPath,
   listProjectSourceAssets,
   listRegressionBaselines,
+  listReviewArtifacts,
   listTaskMcpTools,
   listTaskSourceAssets,
   listTestRuns,
+  listValidationsByTask,
   listVisualVerificationResults,
   listTasks,
   ingestProjectSourceAsset,
   persistPlannerProposal,
+  rejectValidation,
   setMcpServerCredential,
   type LoopEventBus,
   type PrismaClient,
@@ -76,6 +91,7 @@ import {
   type McpServerDefinition,
   type McpServerSetupPayload,
 } from "@vimbuspromax3000/mcp-client";
+import { createJiraClient, importJiraIssues, type JiraIssue } from "@vimbuspromax3000/jira-adapter";
 import { createEvaluatorService, EvaluatorError, type EvaluatorService } from "@vimbuspromax3000/evaluator";
 import {
   assignSlot,
@@ -185,6 +201,8 @@ export type ApiAppOptions = {
    * pin a hard number so we keep the same 25-turn ceiling as Sprint 1).
    */
   agentLoopMaxTurns?: number;
+  playwrightGeneratorDeps?: GeneratePlaywrightSpecDeps;
+  playwrightWorkspaceRoot?: string;
 };
 
 const DEFAULT_EVENTS_HEARTBEAT_MS = 15_000;
@@ -216,6 +234,7 @@ export function createApp(options: ApiAppOptions = {}) {
   const mcpService = createMcpService({ prisma });
   const evaluatorService = options.evaluatorService ?? createEvaluatorService({ prisma, env });
   const eventsHeartbeatMs = options.eventsSseConfig?.heartbeatMs ?? DEFAULT_EVENTS_HEARTBEAT_MS;
+  const playwrightGeneratorDeps = options.playwrightGeneratorDeps;
   const loopEventBus = options.loopEventBus ?? getDefaultLoopEventBus();
 
   app.onError((error, context) =>
@@ -228,21 +247,90 @@ export function createApp(options: ApiAppOptions = {}) {
   );
 
   app.get("/health", (context) => context.json(healthResponse));
+  app.get("/favicon.ico", (context) => context.body(null, 204));
 
   app.get("/projects", async (context) => {
     return context.json(await listProjects(prisma));
   });
 
+  app.get("/projects/lookup", async (context) => {
+    const rootPath = context.req.query("rootPath");
+
+    if (!rootPath) {
+      return context.json({ error: "rootPath is required." }, 400);
+    }
+
+    return context.json({
+      project: await findProjectByRootPath(prisma, rootPath),
+    });
+  });
+
+  app.get("/projects/:id", async (context) => {
+    const project = await getProjectById(prisma, context.req.param("id"));
+
+    if (!project) {
+      return context.json({ error: "Project was not found." }, 404);
+    }
+
+    return context.json(project);
+  });
+
   app.post("/projects", async (context) => {
     const body = await context.req.json();
+    const rootPath = requireString(body.rootPath, "rootPath");
+    const existing = await findProjectByRootPath(prisma, rootPath);
+
+    if (existing) {
+      return context.json({ ...existing, existing: true });
+    }
+
     const project = await createProject(prisma, {
       name: requireString(body.name, "name"),
-      rootPath: requireString(body.rootPath, "rootPath"),
+      rootPath,
       baseBranch: optionalString(body.baseBranch),
       branchNaming: optionalString(body.branchNaming),
     });
 
     return context.json(project, 201);
+  });
+
+  app.post("/jira/import", async (context) => {
+    const body = await context.req.json();
+    const projectId = requireString(body.projectId, "projectId");
+    const epicKey = optionalString(body.epicKey);
+    const jql = optionalString(body.jql);
+    const acceptanceCriteriaField = optionalStringOrStringArray(body.acceptanceCriteriaField, "acceptanceCriteriaField");
+    const directIssues = optionalJiraIssues(body.issues);
+    let issues: readonly JiraIssue[];
+
+    if (directIssues) {
+      issues = directIssues;
+    } else if (jql) {
+      const client = createJiraClient({ env: resolveJiraEnv(env) });
+      issues = await client.fetchIssuesByJql({ jql });
+    } else if (epicKey) {
+      const client = createJiraClient({ env: resolveJiraEnv(env) });
+      const epicImport = await client.fetchEpicWithChildren({ epicKey });
+      issues = epicImport.issues;
+    } else {
+      return context.json({ error: "Either issues, jql, or epicKey is required." }, 400);
+    }
+
+    const result = await importJiraIssues(prisma, {
+      projectId,
+      issues,
+      epicKey,
+      acceptanceCriteriaField,
+    });
+
+    return context.json({
+      ...result,
+      summary: {
+        issueCount: issues.length,
+        taskCount: result.taskIds.length,
+        validationCount: result.validationIds.length,
+      },
+    });
   });
 
   app.post("/planner/runs", async (context) => {
@@ -358,7 +446,9 @@ export function createApp(options: ApiAppOptions = {}) {
         return context.json({ error: "Planner run was not found." }, 404);
       }
 
-      return context.json(plannerRun);
+      const reviewArtifact = await createPlannerReviewArtifact(prisma, plannerRun);
+
+      return context.json({ ...plannerRun, reviewArtifact });
     }
 
     const result = await plannerService.generateAndPersist({
@@ -366,7 +456,86 @@ export function createApp(options: ApiAppOptions = {}) {
       seed: isRecord(body) ? optionalInteger(body.seed) : undefined,
     });
 
-    return context.json(result.plannerRun);
+    const reviewArtifact = await createPlannerReviewArtifact(prisma, result.plannerRun);
+
+    return context.json({ ...result.plannerRun, reviewArtifact });
+  });
+
+  app.get("/review-artifacts", async (context) => {
+    return context.json(
+      await listReviewArtifacts(prisma, {
+        projectId: context.req.query("projectId"),
+        subjectType: context.req.query("subjectType"),
+        subjectId: context.req.query("subjectId"),
+        status: context.req.query("status"),
+      }),
+    );
+  });
+
+  app.post("/review-artifacts", async (context) => {
+    const body = await context.req.json();
+    const artifact = await createReviewArtifact(prisma, {
+      projectId: requireString(body.projectId, "projectId"),
+      subjectType: requireString(body.subjectType, "subjectType"),
+      subjectId: requireString(body.subjectId, "subjectId"),
+      title: requireString(body.title, "title"),
+      markdown: requireString(body.markdown, "markdown"),
+      stage: optionalString(body.stage) ?? "review",
+    });
+
+    return context.json(artifact, 201);
+  });
+
+  app.get("/review-artifacts/:id", async (context) => {
+    const artifact = await getReviewArtifact(prisma, context.req.param("id"));
+
+    if (!artifact) {
+      return context.json({ error: "Review artifact was not found." }, 404);
+    }
+
+    return context.json(artifact);
+  });
+
+  app.post("/review-artifacts/:id/approve", async (context) => {
+    const body = await optionalJsonBody(context.req);
+    const result = await decideReviewArtifact(prisma, {
+      artifactId: context.req.param("id"),
+      status: "granted",
+      operator: optionalString(body.operator),
+      reason: optionalString(body.reason),
+    });
+
+    if (prefersHtml(context.req)) {
+      return context.redirect(`/review/${result.artifact.id}`);
+    }
+
+    return context.json(result);
+  });
+
+  app.post("/review-artifacts/:id/reject", async (context) => {
+    const body = await optionalJsonBody(context.req);
+    const result = await decideReviewArtifact(prisma, {
+      artifactId: context.req.param("id"),
+      status: "rejected",
+      operator: optionalString(body.operator),
+      reason: optionalString(body.reason),
+    });
+
+    if (prefersHtml(context.req)) {
+      return context.redirect(`/review/${result.artifact.id}`);
+    }
+
+    return context.json(result);
+  });
+
+  app.get("/review/:id", async (context) => {
+    const artifact = await getReviewArtifact(prisma, context.req.param("id"));
+
+    if (!artifact) {
+      return context.html(renderReviewNotFoundPage(), 404);
+    }
+
+    return context.html(renderReviewArtifactPage(artifact));
   });
 
   app.get("/approvals", async (context) => {
@@ -430,6 +599,181 @@ export function createApp(options: ApiAppOptions = {}) {
     }
 
     return context.json(task);
+  });
+
+  app.get("/tasks/:id/validations", async (context) => {
+    const task = await getTaskDetail(prisma, context.req.param("id"));
+
+    if (!task) {
+      return context.json({ error: "Task was not found." }, 404);
+    }
+
+    return context.json(await listValidationsByTask(prisma, task.id));
+  });
+
+  app.post("/tasks/:id/validations", async (context) => {
+    const task = await getTaskDetail(prisma, context.req.param("id"));
+
+    if (!task) {
+      return context.json({ error: "Task was not found." }, 404);
+    }
+
+    const body = await context.req.json();
+    const acceptanceCriteriaJson =
+      typeof body.acceptanceCriteriaJson === "string"
+        ? body.acceptanceCriteriaJson
+        : optionalJsonString(body.acceptanceCriteria) ?? "[]";
+    const validation = await createValidation(prisma, {
+      taskId: task.id,
+      testType: requireString(body.testType, "testType"),
+      title: optionalString(body.title) ?? requireString(body.description, "description"),
+      description: optionalString(body.description),
+      acceptanceCriteriaJson,
+      rationale: optionalString(body.rationale),
+      command: optionalString(body.command),
+      testFilePath: optionalString(body.testFilePath),
+      metadataJson: typeof body.metadataJson === "string" ? body.metadataJson : optionalJsonString(body.metadata),
+      orderIndex: optionalInteger(body.orderIndex),
+    });
+
+    return context.json(validation, 201);
+  });
+
+  app.get("/validations/:id", async (context) => {
+    const validation = await getValidation(prisma, context.req.param("id"));
+
+    if (!validation) {
+      return context.json({ error: "Validation was not found." }, 404);
+    }
+
+    return context.json(validation);
+  });
+
+  app.patch("/validations/:id", async (context) => {
+    const existing = await getValidation(prisma, context.req.param("id"));
+
+    if (!existing) {
+      return context.json({ error: "Validation was not found." }, 404);
+    }
+
+    const body = await optionalJsonBody(context.req);
+    const data: Record<string, unknown> = {};
+
+    if ("description" in body) data.description = optionalString(body.description) ?? null;
+    if ("title" in body) data.title = requireString(body.title, "title");
+    if ("testType" in body) data.testType = requireString(body.testType, "testType");
+    if ("acceptanceCriteriaJson" in body) {
+      data.acceptanceCriteriaJson = requireString(body.acceptanceCriteriaJson, "acceptanceCriteriaJson");
+    } else if ("acceptanceCriteria" in body) {
+      data.acceptanceCriteriaJson = optionalJsonString(body.acceptanceCriteria) ?? "[]";
+    }
+    if ("rationale" in body) data.rationale = optionalString(body.rationale) ?? null;
+    if ("command" in body) data.command = optionalString(body.command) ?? null;
+    if ("testFilePath" in body) data.testFilePath = optionalString(body.testFilePath) ?? null;
+
+    return context.json(
+      await prisma.validation.update({
+        where: { id: existing.id },
+        data,
+      }),
+    );
+  });
+
+  app.post("/validations/:id/approve", async (context) => {
+    const body = await optionalJsonBody(context.req);
+    const existing = await getValidation(prisma, context.req.param("id"));
+
+    if (!existing) {
+      return context.json({ error: "Validation was not found." }, 404);
+    }
+
+    return context.json(
+      await approveValidation(prisma, {
+        validationId: existing.id,
+        operator: optionalString(body.operator),
+        reason: optionalString(body.reason),
+      }),
+    );
+  });
+
+  app.post("/validations/:id/reject", async (context) => {
+    const body = await optionalJsonBody(context.req);
+    const existing = await getValidation(prisma, context.req.param("id"));
+
+    if (!existing) {
+      return context.json({ error: "Validation was not found." }, 404);
+    }
+
+    return context.json(
+      await rejectValidation(prisma, {
+        validationId: existing.id,
+        operator: optionalString(body.operator),
+        reason: optionalString(body.reason),
+      }),
+    );
+  });
+
+  app.post("/validations/:id/generate-spec", async (context) => {
+    const body = await optionalJsonBody(context.req);
+    const validation = await prisma.validation.findUnique({
+      where: { id: context.req.param("id") },
+      include: {
+        task: {
+          include: {
+            epic: {
+              include: {
+                project: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!validation) {
+      return context.json({ error: "Validation was not found." }, 404);
+    }
+
+    if (validation.testType !== "playwright") {
+      return context.json({ error: "Only playwright validations can generate Playwright specs." }, 400);
+    }
+
+    const generated = await generatePlaywrightSpec(
+      {
+        taskId: validation.taskId,
+        validationId: validation.id,
+        title: validation.title,
+        description: validation.description,
+        acceptanceCriteria: parseJsonValue(validation.acceptanceCriteriaJson),
+        route: optionalString(body.route),
+        workspaceRoot: options.playwrightWorkspaceRoot,
+      },
+      playwrightGeneratorDeps,
+    );
+    const payloadJson = JSON.stringify({
+      ...generated.payload,
+      ...(options.playwrightWorkspaceRoot
+        ? { stagingWorkspaceRoot: options.playwrightWorkspaceRoot }
+        : {}),
+      language: "typescript",
+      code: generated.code,
+    });
+    const artifact = await createReviewArtifact(prisma, {
+      projectId: validation.task.epic.projectId,
+      ...generated.reviewArtifact,
+      payloadJson,
+    });
+    const reviewUrl = `/review/${encodeURIComponent(artifact.id)}`;
+
+    return context.json(
+      {
+        artifactId: artifact.id,
+        reviewUrl,
+        reviewArtifact: artifact,
+        stagingFilePath: generated.stagingPath.relativePath,
+      },
+      201,
+    );
   });
 
   app.get("/tasks/:id/verification", async (context) => {
@@ -583,7 +927,15 @@ export function createApp(options: ApiAppOptions = {}) {
       return context.json(mcpPrerequisites, 409);
     }
 
-    return context.json(await executionService.startTaskExecution({ taskId: context.req.param("id") }), 201);
+    try {
+      return context.json(await executionService.startTaskExecution({ taskId: context.req.param("id") }), 201);
+    } catch (error) {
+      if (error instanceof ValidationGateError) {
+        return context.json(error.toJSON(), 412);
+      }
+
+      throw error;
+    }
   });
 
   // VIM-49 — Bypass-the-agent-loop entry point used by the M2 dogfood
@@ -1650,6 +2002,466 @@ export function createApp(options: ApiAppOptions = {}) {
   return app;
 }
 
+type PlannerReviewDetail = NonNullable<Awaited<ReturnType<typeof getPlannerRunDetail>>>;
+
+async function createPlannerReviewArtifact(prisma: PrismaClient, plannerRun: PlannerReviewDetail) {
+  return createReviewArtifact(prisma, {
+    projectId: plannerRun.projectId,
+    subjectType: "planner_run",
+    subjectId: plannerRun.id,
+    title: `Plan review: ${plannerRun.goal}`,
+    markdown: buildPlannerReviewMarkdown(plannerRun),
+    stage: "planner_review",
+  });
+}
+
+function buildPlannerReviewMarkdown(plannerRun: PlannerReviewDetail): string {
+  const lines = [
+    `# Plan review: ${plannerRun.goal}`,
+    "",
+    `Status: ${plannerRun.status}`,
+    `Project: ${plannerRun.project.name}`,
+  ];
+
+  if (plannerRun.moduleName) {
+    lines.push(`Module: ${plannerRun.moduleName}`);
+  }
+
+  lines.push("", "## Summary", "", plannerRun.summary ?? "No summary provided.", "", "## Epics");
+
+  if (plannerRun.epics.length === 0) {
+    lines.push("", "No epics proposed.");
+    return lines.join("\n");
+  }
+
+  for (const epic of plannerRun.epics) {
+    lines.push("", `### ${epic.key} ${epic.title}`, "", epic.goal);
+    appendChecklist(lines, "Acceptance", parseJsonList(epic.acceptanceJson));
+    appendChecklist(lines, "Risks", parseJsonList(epic.risksJson));
+
+    if (epic.tasks.length === 0) {
+      lines.push("", "No tasks.");
+      continue;
+    }
+
+    lines.push("", "#### Tasks");
+
+    for (const task of epic.tasks) {
+      lines.push(
+        "",
+        `- ${task.stableId} ${task.title}`,
+        `  - Status: ${task.status}`,
+        `  - Type: ${task.type}`,
+        `  - Complexity: ${task.complexity}`,
+      );
+
+      if (task.description) {
+        lines.push(`  - Description: ${task.description}`);
+      }
+
+      const targetFiles = parseJsonList(task.targetFilesJson);
+      if (targetFiles.length > 0) {
+        lines.push(`  - Target files: ${targetFiles.join(", ")}`);
+      }
+
+      const requires = parseJsonList(task.requiresJson);
+      if (requires.length > 0) {
+        lines.push(`  - Requires: ${requires.join(", ")}`);
+      }
+
+      const plan = task.verificationPlans[0];
+      if (plan) {
+        lines.push(`  - Verification: ${plan.rationale ?? "No rationale."}`);
+        for (const item of plan.items) {
+          lines.push(`    - ${item.kind}: ${item.title}${item.command ? ` (${item.command})` : ""}`);
+        }
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function appendChecklist(lines: string[], title: string, items: string[]): void {
+  if (items.length === 0) {
+    return;
+  }
+
+  lines.push("", `#### ${title}`);
+  for (const item of items) {
+    lines.push(`- ${item}`);
+  }
+}
+
+function parseJsonList(value: string | null | undefined): string[] {
+  if (!value) return [];
+
+  try {
+    const parsed = JSON.parse(value);
+    const raw = Array.isArray(parsed) ? parsed : [parsed];
+    return raw
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (isRecord(item)) {
+          const label = item.label ?? item.title ?? item.description ?? item.value;
+          return typeof label === "string" ? label : undefined;
+        }
+        return undefined;
+      })
+      .filter((item): item is string => typeof item === "string" && item.length > 0);
+  } catch {
+    return [value];
+  }
+}
+
+function prefersHtml(request: { header: (name: string) => string | undefined }): boolean {
+  return request.header("accept")?.includes("text/html") ?? false;
+}
+
+function renderReviewNotFoundPage(): string {
+  return renderHtmlDocument({
+    title: "Review not found",
+    body: [
+      `<main class="shell">`,
+      `<p class="eyebrow">TaskGoblin Review</p>`,
+      `<h1>Review not found</h1>`,
+      `<p class="muted">The requested markdown review artifact does not exist.</p>`,
+      `</main>`,
+    ].join("\n"),
+  });
+}
+
+function renderReviewArtifactPage(artifact: {
+  id: string;
+  title: string;
+  markdown: string;
+  status: string;
+  subjectType: string;
+  subjectId: string;
+  stage: string;
+  payloadJson?: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}): string {
+  const locked = artifact.status !== "pending";
+  const payload = parseReviewArtifactPayload(artifact.payloadJson);
+  const codeBlock =
+    payload?.kind === "playwright_spec" && typeof payload.code === "string"
+      ? `<section class="markdown"><h2>Generated spec</h2><pre><code>${escapeHtml(payload.code)}</code></pre></section>`
+      : "";
+  const actions = locked
+    ? `<p class="muted">Decision recorded: ${escapeHtml(artifact.status)}.</p>`
+    : [
+        `<form method="post" action="/review-artifacts/${encodeURIComponent(artifact.id)}/approve">`,
+        `<button class="primary" type="submit">Approve</button>`,
+        `</form>`,
+        `<form method="post" action="/review-artifacts/${encodeURIComponent(artifact.id)}/reject">`,
+        `<button class="secondary" type="submit">Reject</button>`,
+        `</form>`,
+      ].join("\n");
+
+  return renderHtmlDocument({
+    title: artifact.title,
+    body: [
+      `<main class="shell">`,
+      `<header class="top">`,
+      `<div>`,
+      `<p class="eyebrow">TaskGoblin Review</p>`,
+      `<h1>${escapeHtml(artifact.title)}</h1>`,
+      `<p class="meta">${escapeHtml(artifact.subjectType)} / ${escapeHtml(artifact.subjectId)} / ${escapeHtml(artifact.stage)}</p>`,
+      `</div>`,
+      `<span class="status ${escapeHtml(artifact.status)}">${escapeHtml(artifact.status)}</span>`,
+      `</header>`,
+      `<article class="markdown">${renderMarkdown(artifact.markdown)}</article>`,
+      codeBlock,
+      `<footer class="bar">${actions}</footer>`,
+      `</main>`,
+    ].join("\n"),
+  });
+}
+
+function parseReviewArtifactPayload(payloadJson: string | null | undefined): Record<string, unknown> | null {
+  if (!payloadJson) return null;
+
+  try {
+    const parsed = JSON.parse(payloadJson);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function renderHtmlDocument(input: { title: string; body: string }): string {
+  return [
+    "<!doctype html>",
+    `<html lang="en">`,
+    "<head>",
+    `<meta charset="utf-8">`,
+    `<meta name="viewport" content="width=device-width, initial-scale=1">`,
+    `<title>${escapeHtml(input.title)}</title>`,
+    "<style>",
+    reviewStyles,
+    "</style>",
+    "</head>",
+    "<body>",
+    input.body,
+    "</body>",
+    "</html>",
+  ].join("\n");
+}
+
+function renderMarkdown(markdown: string): string {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const out: string[] = [];
+  let inList = false;
+  let inCode = false;
+  let codeLines: string[] = [];
+
+  const closeList = () => {
+    if (inList) {
+      out.push("</ul>");
+      inList = false;
+    }
+  };
+
+  for (const line of lines) {
+    if (line.trim().startsWith("```")) {
+      if (inCode) {
+        out.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+        codeLines = [];
+        inCode = false;
+      } else {
+        closeList();
+        inCode = true;
+      }
+      continue;
+    }
+
+    if (inCode) {
+      codeLines.push(line);
+      continue;
+    }
+
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      closeList();
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      closeList();
+      const level = heading[1]!.length;
+      out.push(`<h${level}>${escapeInlineMarkdown(heading[2]!)}</h${level}>`);
+      continue;
+    }
+
+    const bullet = trimmed.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      if (!inList) {
+        out.push("<ul>");
+        inList = true;
+      }
+      out.push(`<li>${escapeInlineMarkdown(bullet[1]!)}</li>`);
+      continue;
+    }
+
+    closeList();
+    out.push(`<p>${escapeInlineMarkdown(trimmed)}</p>`);
+  }
+
+  if (inCode) {
+    out.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+  }
+  closeList();
+
+  return out.join("\n");
+}
+
+function escapeInlineMarkdown(value: string): string {
+  return escapeHtml(value).replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+const reviewStyles = `
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #fafafa;
+  color: #0a0a0a;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #fafafa;
+}
+.shell {
+  width: min(920px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 56px 0 120px;
+}
+.top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 28px;
+  border-bottom: 1px solid #e5e5e5;
+}
+.eyebrow {
+  margin: 0 0 10px;
+  color: #666;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+h1 {
+  margin: 0;
+  font-size: 44px;
+  line-height: 1;
+  letter-spacing: 0;
+}
+.meta,
+.muted {
+  color: #737373;
+}
+.meta {
+  margin: 14px 0 0;
+  font-size: 14px;
+}
+.status {
+  flex: none;
+  border: 1px solid #d4d4d4;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  background: #fff;
+}
+.status.approved {
+  border-color: #0a0a0a;
+}
+.status.rejected {
+  border-color: #a3a3a3;
+  color: #525252;
+}
+.markdown {
+  padding: 36px 0;
+  font-size: 16px;
+  line-height: 1.7;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 34px 0 12px;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+.markdown h1 { font-size: 34px; }
+.markdown h2 { font-size: 26px; }
+.markdown h3 { font-size: 20px; }
+.markdown h4 { font-size: 16px; }
+.markdown p,
+.markdown ul {
+  margin: 0 0 16px;
+}
+.markdown ul {
+  padding-left: 22px;
+}
+code,
+pre {
+  font-family: "Geist Mono", "SFMono-Regular", Consolas, monospace;
+}
+code {
+  border: 1px solid #e5e5e5;
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: #fff;
+  font-size: .92em;
+}
+pre {
+  overflow: auto;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  padding: 16px;
+  background: #fff;
+}
+pre code {
+  border: 0;
+  padding: 0;
+}
+.bar {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  width: min(920px, calc(100vw - 32px));
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #e5e5e5;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .9);
+  backdrop-filter: blur(12px);
+}
+form {
+  margin: 0;
+}
+button {
+  height: 36px;
+  border-radius: 6px;
+  padding: 0 14px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.primary {
+  border: 1px solid #0a0a0a;
+  background: #0a0a0a;
+  color: #fff;
+}
+.secondary {
+  border: 1px solid #d4d4d4;
+  background: #fff;
+  color: #0a0a0a;
+}
+@media (max-width: 640px) {
+  .shell {
+    padding-top: 32px;
+  }
+  .top {
+    flex-direction: column;
+  }
+  h1 {
+    font-size: 30px;
+    line-height: 1.08;
+  }
+  .bar {
+    justify-content: stretch;
+  }
+  .bar form,
+  .bar button {
+    width: 100%;
+  }
+}
+`;
+
 function requireProjectId(projectId: string | undefined): string {
   if (!projectId) {
     throw new Error("projectId query parameter is required.");
@@ -1672,6 +2484,81 @@ function optionalString(value: unknown): string | undefined {
   }
 
   return value;
+}
+
+function optionalStringOrStringArray(value: unknown, fieldName: string): string | string[] | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) {
+    return value;
+  }
+
+  throw new Error(`${fieldName} must be a string or string array.`);
+}
+
+function optionalJiraIssues(value: unknown): readonly JiraIssue[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error("issues must be an array.");
+  }
+
+  return value as JiraIssue[];
+}
+
+function resolveJiraEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  return {
+    ...readLocalEnvFiles([".env.local", ".env"]),
+    ...env,
+  };
+}
+
+function readLocalEnvFiles(paths: readonly string[]): Record<string, string | undefined> {
+  const values: Record<string, string | undefined> = {};
+
+  for (const path of paths) {
+    if (!existsSync(path)) continue;
+
+    const content = readFileSync(path, "utf8");
+    for (const line of content.split(/\r?\n/)) {
+      const entry = parseEnvLine(line);
+      if (!entry) continue;
+      if (values[entry.key] === undefined) values[entry.key] = entry.value;
+    }
+  }
+
+  return values;
+}
+
+function parseEnvLine(line: string): { key: string; value: string } | null {
+  const trimmed = line.trim();
+
+  if (!trimmed || trimmed.startsWith("#")) {
+    return null;
+  }
+
+  const separator = trimmed.indexOf("=");
+  if (separator <= 0) {
+    return null;
+  }
+
+  const key = trimmed.slice(0, separator).trim().replace(/^export\s+/, "");
+  const rawValue = trimmed.slice(separator + 1).trim();
+  const quote = rawValue[0];
+  const value =
+    (quote === '"' || quote === "'") && rawValue.endsWith(quote)
+      ? rawValue.slice(1, -1)
+      : rawValue.replace(/\s+#.*$/, "");
+
+  return key ? { key, value } : null;
 }
 
 function optionalNumber(value: string | undefined): number | undefined {

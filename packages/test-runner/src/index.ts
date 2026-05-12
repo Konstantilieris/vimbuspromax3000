@@ -13,6 +13,7 @@ import {
   getTaskExecutionDetail,
   listTestRuns,
   persistVisualVerificationResult,
+  setValidationExecutionResult,
   setTaskStatus,
   updatePatchReview,
   updateTaskBranch,
@@ -135,6 +136,16 @@ type CommandRunnerResult = {
 
 type ExecutionVerificationContext = NonNullable<Awaited<ReturnType<typeof getExecutionVerificationRunContext>>>;
 type VerificationRunItem = NonNullable<ExecutionVerificationContext["latestApprovedVerificationPlan"]>["items"][number];
+
+type SingleShotCommandTarget = {
+  command: string;
+  verificationItemId: string | null;
+  artifactItemId: string;
+  orderIndex: number;
+  kind: string;
+  title: string;
+  validationId?: string;
+};
 
 type BrowserVerificationRunner = {
   navigate: typeof navigateBrowser;
@@ -347,8 +358,15 @@ export function createTestRunnerService(options: {
       }
 
       const items = verificationPlan.items;
+      const validationCommandTargets = await listApprovedPlaywrightValidationCommandTargets(
+        prisma,
+        execution.task.id,
+        items,
+      );
+      const validationTargetsByItemId = groupValidationTargetsByItemId(validationCommandTargets);
+      const coveredValidationItemIds = new Set(validationTargetsByItemId.keys());
 
-      if (items.length === 0) {
+      if (items.length === 0 && validationCommandTargets.length === 0) {
         throw new TestRunnerEligibilityError({
           code: "NO_APPROVED_VERIFICATION_ITEMS",
           message: "This execution has no approved verification items to run.",
@@ -359,6 +377,7 @@ export function createTestRunnerService(options: {
       const unsupportedItems = items
         .filter(
           (item) =>
+            !coveredValidationItemIds.has(item.id) &&
             !hasExecutableCommand(item.command) &&
             !isVisualVerificationDispatchItem(item) &&
             !isA11yVerificationDispatchItem(item),
@@ -390,6 +409,25 @@ export function createTestRunnerService(options: {
       let hasFailure = false;
 
       for (const item of items) {
+        const validationTargets = validationTargetsByItemId.get(item.id);
+        if (validationTargets) {
+          for (const target of validationTargets) {
+            const outcome = await runSingleShotCommandTarget({
+              prisma,
+              execution,
+              project,
+              target,
+              commandRunner,
+            });
+
+            if (outcome.testStatus !== "passed") {
+              hasFailure = true;
+            }
+          }
+
+          continue;
+        }
+
         if (!hasExecutableCommand(item.command)) {
           const result = isA11yVerificationDispatchItem(item)
             ? await runA11yVerificationItem({
@@ -414,127 +452,31 @@ export function createTestRunnerService(options: {
           continue;
         }
 
-        const command = item.command?.trim() ?? "";
-        const startedAt = new Date();
-        const testRun = await prisma.$transaction(async (tx) => {
-          const created = await createTestRun(tx, {
-            taskExecutionId: execution.id,
-            verificationItemId: item.id,
-            command,
-            status: "running",
-            startedAt,
-          });
-
-          await tx.verificationItem.update({
-            where: { id: item.id },
-            data: {
-              status: "running",
-            },
-          });
-
-          await appendLoopEvent(tx, {
-            projectId: project.id,
-            taskExecutionId: execution.id,
-            type: "test.started",
-            payload: {
-              taskId: execution.task.id,
-              verificationItemId: item.id,
-              testRunId: created.id,
-              command,
-            },
-          });
-
-          return created;
+        const outcome = await runSingleShotCommandTarget({
+          prisma,
+          execution,
+          project,
+          target: commandTargetFromVerificationItem(item),
+          commandRunner,
         });
 
-        const result = commandRunner({
-          command,
-          rootPath: project.rootPath,
-          executionId: execution.id,
-          verificationItemId: item.id,
-          orderIndex: item.orderIndex,
-        });
-        const finishedAt = new Date();
-        const testStatus = result.exitCode === 0 ? "passed" : "failed";
-        const itemStatus = result.exitCode === 0 ? "green" : "failed";
-
-        if (result.exitCode !== 0) {
+        if (outcome.testStatus !== "passed") {
           hasFailure = true;
         }
+      }
 
-        await prisma.$transaction(async (tx) => {
-          await updateTestRun(tx, testRun.id, {
-            status: testStatus,
-            exitCode: result.exitCode,
-            stdoutPath: result.stdoutPath,
-            stderrPath: result.stderrPath,
-            finishedAt,
-          });
-
-          await tx.verificationItem.update({
-            where: { id: item.id },
-            data: {
-              status: itemStatus,
-            },
-          });
-
-          if (result.stdout.trim().length > 0) {
-            await appendLoopEvent(tx, {
-              projectId: project.id,
-              taskExecutionId: execution.id,
-              type: "test.stdout",
-              payload: {
-                taskId: execution.task.id,
-                verificationItemId: item.id,
-                testRunId: testRun.id,
-                path: result.stdoutPath,
-                chunk: result.stdout,
-              },
-            });
-          }
-
-          if (result.stderr.trim().length > 0) {
-            await appendLoopEvent(tx, {
-              projectId: project.id,
-              taskExecutionId: execution.id,
-              type: "test.stderr",
-              payload: {
-                taskId: execution.task.id,
-                verificationItemId: item.id,
-                testRunId: testRun.id,
-                path: result.stderrPath,
-                chunk: result.stderr,
-              },
-            });
-          }
-
-          await appendLoopEvent(tx, {
-            projectId: project.id,
-            taskExecutionId: execution.id,
-            type: "test.finished",
-            payload: {
-              taskId: execution.task.id,
-              verificationItemId: item.id,
-              testRunId: testRun.id,
-              exitCode: result.exitCode,
-              status: testStatus,
-            },
-          });
+      for (const target of validationCommandTargets.filter((target) => target.verificationItemId === null)) {
+        const outcome = await runSingleShotCommandTarget({
+          prisma,
+          execution,
+          project,
+          target,
+          commandRunner,
         });
 
-        writeTestRunMetaFile({
-          artifactDirectory: result.artifactDirectory,
-          executionId: execution.id,
-          verificationItemId: item.id,
-          orderIndex: item.orderIndex,
-          kind: item.kind,
-          title: item.title,
-          command,
-          startedAt,
-          finishedAt,
-          exitCode: result.exitCode,
-          status: testStatus,
-        });
+        if (outcome.testStatus !== "passed") {
+          hasFailure = true;
+        }
       }
 
       if (hasFailure) {
@@ -620,6 +562,174 @@ export function createTestRunnerService(options: {
  * `.artifacts/executions/<id>/test-runs/<iter>-<phase>-<order>-<itemId>/`
  * so phase artifacts never overwrite each other.
  */
+async function runSingleShotCommandTarget(input: {
+  prisma: PrismaClient;
+  execution: ExecutionVerificationContext;
+  project: ExecutionVerificationContext["task"]["epic"]["project"];
+  target: SingleShotCommandTarget;
+  commandRunner: (input: CommandRunnerInput) => CommandRunnerResult;
+}) {
+  const command = input.target.command;
+  const startedAt = new Date();
+
+  const testRun = await input.prisma.$transaction(async (tx) => {
+    const created = await createTestRun(tx, {
+      taskExecutionId: input.execution.id,
+      verificationItemId: input.target.verificationItemId,
+      command,
+      status: "running",
+      startedAt,
+    });
+
+    if (input.target.verificationItemId) {
+      await tx.verificationItem.update({
+        where: { id: input.target.verificationItemId },
+        data: {
+          status: "running",
+        },
+      });
+    }
+
+    if (input.target.validationId) {
+      await setValidationExecutionResult(tx, {
+        validationId: input.target.validationId,
+        status: "running",
+        taskExecutionId: input.execution.id,
+        testRunId: created.id,
+        startedAt,
+      });
+    }
+
+    await appendLoopEvent(tx, {
+      projectId: input.project.id,
+      taskExecutionId: input.execution.id,
+      type: "test.started",
+      payload: {
+        taskId: input.execution.task.id,
+        verificationItemId: input.target.verificationItemId,
+        validationId: input.target.validationId ?? null,
+        testRunId: created.id,
+        command,
+      },
+    });
+
+    return created;
+  });
+
+  const result = input.commandRunner({
+    command,
+    rootPath: input.project.rootPath,
+    executionId: input.execution.id,
+    verificationItemId: input.target.artifactItemId,
+    orderIndex: input.target.orderIndex,
+  });
+  const finishedAt = new Date();
+  const testStatus: "passed" | "failed" = result.exitCode === 0 ? "passed" : "failed";
+  const itemStatus = result.exitCode === 0 ? "green" : "failed";
+
+  await input.prisma.$transaction(async (tx) => {
+    await updateTestRun(tx, testRun.id, {
+      status: testStatus,
+      exitCode: result.exitCode,
+      stdoutPath: result.stdoutPath,
+      stderrPath: result.stderrPath,
+      finishedAt,
+    });
+
+    if (input.target.verificationItemId) {
+      await tx.verificationItem.update({
+        where: { id: input.target.verificationItemId },
+        data: {
+          status: itemStatus,
+        },
+      });
+    }
+
+    if (input.target.validationId) {
+      await setValidationExecutionResult(tx, {
+        validationId: input.target.validationId,
+        status: testStatus,
+        taskExecutionId: input.execution.id,
+        testRunId: testRun.id,
+        exitCode: result.exitCode,
+        resultSummary: `Playwright validation ${testStatus}.`,
+        resultJson: JSON.stringify({
+          command,
+          stdoutPath: result.stdoutPath,
+          stderrPath: result.stderrPath,
+        }),
+        artifactPath: result.artifactDirectory,
+        finishedAt,
+      });
+    }
+
+    if (result.stdout.trim().length > 0) {
+      await appendLoopEvent(tx, {
+        projectId: input.project.id,
+        taskExecutionId: input.execution.id,
+        type: "test.stdout",
+        payload: {
+          taskId: input.execution.task.id,
+          verificationItemId: input.target.verificationItemId,
+          validationId: input.target.validationId ?? null,
+          testRunId: testRun.id,
+          path: result.stdoutPath,
+          chunk: result.stdout,
+        },
+      });
+    }
+
+    if (result.stderr.trim().length > 0) {
+      await appendLoopEvent(tx, {
+        projectId: input.project.id,
+        taskExecutionId: input.execution.id,
+        type: "test.stderr",
+        payload: {
+          taskId: input.execution.task.id,
+          verificationItemId: input.target.verificationItemId,
+          validationId: input.target.validationId ?? null,
+          testRunId: testRun.id,
+          path: result.stderrPath,
+          chunk: result.stderr,
+        },
+      });
+    }
+
+    await appendLoopEvent(tx, {
+      projectId: input.project.id,
+      taskExecutionId: input.execution.id,
+      type: "test.finished",
+      payload: {
+        taskId: input.execution.task.id,
+        verificationItemId: input.target.verificationItemId,
+        validationId: input.target.validationId ?? null,
+        testRunId: testRun.id,
+        exitCode: result.exitCode,
+        status: testStatus,
+      },
+    });
+  });
+
+  writeTestRunMetaFile({
+    artifactDirectory: result.artifactDirectory,
+    executionId: input.execution.id,
+    verificationItemId: input.target.artifactItemId,
+    orderIndex: input.target.orderIndex,
+    kind: input.target.kind,
+    title: input.target.title,
+    command,
+    startedAt,
+    finishedAt,
+    exitCode: result.exitCode,
+    status: testStatus,
+  });
+
+  return {
+    testRunId: testRun.id,
+    testStatus,
+  };
+}
+
 async function runCommandItem(input: {
   prisma: PrismaClient;
   execution: ExecutionVerificationContext;
@@ -777,6 +887,80 @@ async function runCommandItem(input: {
  */
 function isLogicKind(kind: string): boolean {
   return kind.trim().toLowerCase() === "logic";
+}
+
+function commandTargetFromVerificationItem(item: VerificationRunItem): SingleShotCommandTarget {
+  return {
+    command: item.command?.trim() ?? "",
+    verificationItemId: item.id,
+    artifactItemId: item.id,
+    orderIndex: item.orderIndex,
+    kind: item.kind,
+    title: item.title,
+  };
+}
+
+async function listApprovedPlaywrightValidationCommandTargets(
+  prisma: PrismaClient,
+  taskId: string,
+  items: readonly VerificationRunItem[],
+): Promise<SingleShotCommandTarget[]> {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const validations = await prisma.validation.findMany({
+    where: {
+      taskId,
+      status: "approved",
+      testType: "playwright",
+      testFilePath: {
+        not: null,
+      },
+    },
+    orderBy: [{ orderIndex: "asc" }, { createdAt: "asc" }],
+  });
+
+  const targets: SingleShotCommandTarget[] = [];
+
+  for (const validation of validations) {
+    const testFilePath = validation.testFilePath?.trim();
+    if (!testFilePath) {
+      continue;
+    }
+
+    const referencedItemId = validation.verificationItemId ?? validation.legacyVerificationItemId;
+    const referencedItem = referencedItemId ? itemById.get(referencedItemId) : undefined;
+
+    if (referencedItem && hasExecutableCommand(referencedItem.command)) {
+      continue;
+    }
+
+    targets.push({
+      command: `bunx playwright test ${testFilePath}`,
+      verificationItemId: referencedItem?.id ?? null,
+      artifactItemId: referencedItem?.id ?? validation.id,
+      orderIndex: referencedItem?.orderIndex ?? validation.orderIndex,
+      kind: referencedItem?.kind ?? validation.testType,
+      title: referencedItem?.title ?? validation.title,
+      validationId: validation.id,
+    });
+  }
+
+  return targets;
+}
+
+function groupValidationTargetsByItemId(targets: readonly SingleShotCommandTarget[]) {
+  const grouped = new Map<string, SingleShotCommandTarget[]>();
+
+  for (const target of targets) {
+    if (!target.verificationItemId) {
+      continue;
+    }
+
+    const existing = grouped.get(target.verificationItemId) ?? [];
+    existing.push(target);
+    grouped.set(target.verificationItemId, existing);
+  }
+
+  return grouped;
 }
 
 async function runVisualVerificationItem(input: {

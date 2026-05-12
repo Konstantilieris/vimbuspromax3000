@@ -1,6 +1,25 @@
 import { appendLoopEvent } from "./eventRepository";
 import type { DatabaseClient } from "./types";
 
+type PlannerProposalValidationInput = {
+  testType?: string;
+  kind?: string;
+  runner?: string | null;
+  title?: string;
+  description?: string | null;
+  acceptanceCriteria?: unknown;
+  acceptanceCriteriaJson?: string | null;
+  rationale?: string | null;
+  command?: string | null;
+  testFilePath?: string | null;
+  metadata?: unknown;
+  metadataJson?: string | null;
+  orderIndex?: number;
+  verificationItemIndex?: number;
+  legacyVerificationItemIndex?: number;
+  status?: string;
+};
+
 export type CreatePlannerRunInput = {
   projectId: string;
   goal: string;
@@ -28,6 +47,7 @@ export type PlannerProposalInput = {
       acceptance: unknown;
       targetFiles?: unknown;
       requires?: unknown;
+      validations?: PlannerProposalValidationInput[];
       verificationPlan: {
         rationale?: string | null;
         items: Array<{
@@ -43,6 +63,7 @@ export type PlannerProposalInput = {
           expectedAssetId?: string | null;
           orderIndex?: number;
           config?: unknown;
+          validation?: PlannerProposalValidationInput | null;
         }>;
       };
     }>;
@@ -206,6 +227,7 @@ export async function persistPlannerProposal(db: DatabaseClient, input: PlannerP
           throw new Error(`Task ${task.stableId} must include at least one verification item.`);
         }
 
+        const taskAcceptanceJson = serializeRequiredJson(task.acceptance, `task ${task.stableId} acceptance`);
         const createdTask = await tx.task.create({
           data: {
             epicId: createdEpic.id,
@@ -216,7 +238,7 @@ export async function persistPlannerProposal(db: DatabaseClient, input: PlannerP
             complexity: task.complexity,
             status: "planned",
             orderIndex: task.orderIndex ?? taskIndex,
-            acceptanceJson: serializeRequiredJson(task.acceptance, `task ${task.stableId} acceptance`),
+            acceptanceJson: taskAcceptanceJson,
             targetFilesJson: serializeJson(task.targetFiles),
             requiresJson: serializeJson(task.requires),
           },
@@ -230,8 +252,14 @@ export async function persistPlannerProposal(db: DatabaseClient, input: PlannerP
           },
         });
 
+        const createdVerificationItems: Array<{
+          input: (typeof task.verificationPlan.items)[number];
+          row: { id: string };
+          itemIndex: number;
+        }> = [];
+
         for (const [itemIndex, item] of task.verificationPlan.items.entries()) {
-          await tx.verificationItem.create({
+          const createdVerificationItem = await tx.verificationItem.create({
             data: {
               planId: verificationPlan.id,
               taskId: createdTask.id,
@@ -249,6 +277,53 @@ export async function persistPlannerProposal(db: DatabaseClient, input: PlannerP
               orderIndex: item.orderIndex ?? itemIndex,
               configJson: serializeJson(item.config),
             },
+          });
+
+          createdVerificationItems.push({
+            input: item,
+            row: createdVerificationItem,
+            itemIndex,
+          });
+        }
+
+        const explicitValidationItems = splitExplicitValidationsByLegacyItem(
+          task.validations ?? [],
+          createdVerificationItems.length,
+          task.stableId,
+        );
+
+        for (const createdVerificationItem of createdVerificationItems) {
+          const explicitValidation = explicitValidationItems.byItemIndex.get(createdVerificationItem.itemIndex);
+
+          await createValidationForVerificationItem(tx, {
+            taskId: createdTask.id,
+            taskStableId: task.stableId,
+            taskAcceptanceJson,
+            verificationItemId: createdVerificationItem.row.id,
+            item: createdVerificationItem.input,
+            itemIndex: createdVerificationItem.itemIndex,
+            validation: explicitValidation ?? createdVerificationItem.input.validation ?? undefined,
+          });
+        }
+
+        for (const { validation, validationIndex } of explicitValidationItems.standalone) {
+          const createdVerificationItem = await createVerificationItemForStandaloneValidation(tx, {
+            taskId: createdTask.id,
+            planId: verificationPlan.id,
+            taskStableId: task.stableId,
+            validation,
+            validationIndex,
+            orderIndex: task.verificationPlan.items.length + validationIndex,
+          });
+
+          await createValidationForVerificationItem(tx, {
+            taskId: createdTask.id,
+            taskStableId: task.stableId,
+            taskAcceptanceJson,
+            verificationItemId: createdVerificationItem.id,
+            item: null,
+            itemIndex: task.verificationPlan.items.length + validationIndex,
+            validation,
           });
         }
       }
@@ -304,6 +379,11 @@ async function clearPlannerRunProposal(db: DatabaseClient, plannerRunId: string)
   const taskIds = tasks.map((task) => task.id);
 
   if (taskIds.length > 0) {
+    await db.validation.deleteMany({
+      where: {
+        taskId: { in: taskIds },
+      },
+    });
     await db.verificationItem.deleteMany({
       where: {
         taskId: { in: taskIds },
@@ -324,6 +404,174 @@ async function clearPlannerRunProposal(db: DatabaseClient, plannerRunId: string)
   await db.epic.deleteMany({
     where: { plannerRunId },
   });
+}
+
+function splitExplicitValidationsByLegacyItem(
+  validations: PlannerProposalValidationInput[],
+  itemCount: number,
+  taskStableId: string,
+) {
+  const byItemIndex = new Map<number, PlannerProposalValidationInput>();
+  const standalone: Array<{ validation: PlannerProposalValidationInput; validationIndex: number }> = [];
+
+  for (const [validationIndex, validation] of validations.entries()) {
+    const itemIndex = validation.verificationItemIndex ?? validation.legacyVerificationItemIndex;
+
+    if (itemIndex === undefined || itemIndex === null) {
+      standalone.push({ validation, validationIndex });
+      continue;
+    }
+
+    if (itemIndex < 0 || itemIndex >= itemCount) {
+      throw new Error(`Task ${taskStableId} validation ${validationIndex} references missing verification item ${itemIndex}.`);
+    }
+
+    if (byItemIndex.has(itemIndex)) {
+      throw new Error(`Task ${taskStableId} has multiple validations for verification item ${itemIndex}.`);
+    }
+
+    byItemIndex.set(itemIndex, validation);
+  }
+
+  return { byItemIndex, standalone };
+}
+
+async function createVerificationItemForStandaloneValidation(
+  db: DatabaseClient,
+  input: {
+    taskId: string;
+    planId: string;
+    taskStableId: string;
+    validation: PlannerProposalValidationInput;
+    validationIndex: number;
+    orderIndex: number;
+  },
+) {
+  const title = resolveStandaloneValidationTitle(input.validation, input.taskStableId, input.validationIndex);
+
+  return db.verificationItem.create({
+    data: {
+      planId: input.planId,
+      taskId: input.taskId,
+      kind: input.validation.kind ?? input.validation.testType ?? "manual",
+      runner: input.validation.runner ?? null,
+      title,
+      description: input.validation.description ?? title,
+      rationale: input.validation.rationale ?? null,
+      command: input.validation.command ?? null,
+      testFilePath: input.validation.testFilePath ?? null,
+      route: null,
+      interaction: null,
+      expectedAssetId: null,
+      status: "proposed",
+      orderIndex: input.validation.orderIndex ?? input.orderIndex,
+      configJson: resolveValidationMetadataJson(input.validation, null),
+    },
+  });
+}
+
+async function createValidationForVerificationItem(
+  db: DatabaseClient,
+  input: {
+    taskId: string;
+    taskStableId: string;
+    taskAcceptanceJson: string;
+    verificationItemId: string;
+    item: PlannerProposalInput["epics"][number]["tasks"][number]["verificationPlan"]["items"][number] | null;
+    itemIndex: number;
+    validation?: PlannerProposalValidationInput | null;
+  },
+) {
+  const validation = input.validation ?? undefined;
+  const status = validation?.status ?? "proposed";
+
+  return db.validation.create({
+    data: {
+      taskId: input.taskId,
+      verificationItemId: input.verificationItemId,
+      testType: resolveValidationTestType(input.item, validation),
+      status,
+      title: resolveValidationTitle(input.item, validation, input.taskStableId, input.itemIndex),
+      description: validation?.description ?? input.item?.description ?? null,
+      acceptanceCriteriaJson: resolveValidationAcceptanceCriteriaJson(validation, input.taskAcceptanceJson),
+      rationale: validation?.rationale ?? input.item?.rationale ?? null,
+      command: validation?.command ?? input.item?.command ?? null,
+      testFilePath: validation?.testFilePath ?? input.item?.testFilePath ?? null,
+      metadataJson: resolveValidationMetadataJson(validation, input.item?.config),
+      orderIndex: validation?.orderIndex ?? input.item?.orderIndex ?? input.itemIndex,
+      legacyVerificationItemId: input.verificationItemId,
+      approvedAt: status === "approved" ? new Date() : null,
+      rejectedAt: status === "rejected" ? new Date() : null,
+    },
+  });
+}
+
+function resolveValidationTestType(
+  item: PlannerProposalInput["epics"][number]["tasks"][number]["verificationPlan"]["items"][number] | null,
+  validation: PlannerProposalValidationInput | undefined,
+) {
+  if (validation?.testType) {
+    return validation.testType;
+  }
+
+  if (validation?.kind) {
+    return validation.kind;
+  }
+
+  if (!item) {
+    return "manual";
+  }
+
+  return item.runner === "playwright" ? "playwright" : item.kind;
+}
+
+function resolveValidationTitle(
+  item: PlannerProposalInput["epics"][number]["tasks"][number]["verificationPlan"]["items"][number] | null,
+  validation: PlannerProposalValidationInput | undefined,
+  taskStableId: string,
+  itemIndex: number,
+) {
+  const title = validation?.title ?? item?.title;
+
+  if (!title) {
+    throw new Error(`Task ${taskStableId} validation ${itemIndex} title is required.`);
+  }
+
+  return title;
+}
+
+function resolveStandaloneValidationTitle(
+  validation: PlannerProposalValidationInput,
+  taskStableId: string,
+  validationIndex: number,
+) {
+  if (!validation.title) {
+    throw new Error(`Task ${taskStableId} validation ${validationIndex} title is required.`);
+  }
+
+  return validation.title;
+}
+
+function resolveValidationAcceptanceCriteriaJson(
+  validation: PlannerProposalValidationInput | undefined,
+  taskAcceptanceJson: string,
+) {
+  if (validation?.acceptanceCriteriaJson !== undefined && validation.acceptanceCriteriaJson !== null) {
+    return validation.acceptanceCriteriaJson;
+  }
+
+  return serializeJson(validation?.acceptanceCriteria) ?? taskAcceptanceJson;
+}
+
+function resolveValidationMetadataJson(
+  validation: PlannerProposalValidationInput | undefined,
+  fallbackMetadata: unknown,
+) {
+  if (validation?.metadataJson !== undefined && validation.metadataJson !== null) {
+    return validation.metadataJson;
+  }
+
+  return serializeJson(validation?.metadata) ?? serializeJson(fallbackMetadata);
 }
 
 function parseRecordJson(value: string | null): Record<string, unknown> {

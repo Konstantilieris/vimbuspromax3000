@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, sep } from "node:path";
 import app, { createApp, healthResponse } from "./app";
 import {
   createIsolatedPrisma,
@@ -17,6 +17,534 @@ describe("GET /health", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(healthResponse);
+  });
+});
+
+describe("project API", () => {
+  let prisma: PrismaClient;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    const isolated = await createIsolatedPrisma("vimbus-project-api-");
+    prisma = isolated.prisma;
+    tempDir = isolated.tempDir;
+  });
+
+  afterEach(async () => {
+    await prisma.$disconnect();
+    removeTempDir(tempDir);
+  });
+
+  test("looks up projects by normalized root path and returns null for misses", async () => {
+    const api = createApp({ prisma });
+    const createRef = await postJson(api, "/projects", {
+      name: "Lookup Project",
+      rootPath: join(tempDir, "workspace", "."),
+    });
+    expect(createRef.status).toBe(201);
+    const project = await createRef.json();
+    const rootPathWithTrailingSeparator = project.rootPath.endsWith(sep)
+      ? project.rootPath
+      : `${project.rootPath}${sep}`;
+
+    const lookupRef = await api.fetch(
+      new Request(`http://localhost/projects/lookup?rootPath=${encodeURIComponent(rootPathWithTrailingSeparator)}`),
+    );
+    expect(lookupRef.status).toBe(200);
+    await expect(lookupRef.json()).resolves.toMatchObject({
+      project: {
+        id: project.id,
+        rootPath: project.rootPath,
+      },
+    });
+
+    const missingRef = await api.fetch(
+      new Request(`http://localhost/projects/lookup?rootPath=${encodeURIComponent(join(tempDir, "missing"))}`),
+    );
+    expect(missingRef.status).toBe(200);
+    await expect(missingRef.json()).resolves.toEqual({ project: null });
+  });
+
+  test("fetches a project by id and creates projects idempotently by root path", async () => {
+    const api = createApp({ prisma });
+    const firstRef = await postJson(api, "/projects", {
+      name: "Idempotent Project",
+      rootPath: join(tempDir, "workspace"),
+    });
+    expect(firstRef.status).toBe(201);
+    const first = await firstRef.json();
+
+    const secondRef = await postJson(api, "/projects", {
+      name: "Duplicate Project",
+      rootPath: `${first.rootPath}${sep}`,
+    });
+    expect(secondRef.status).toBe(200);
+    const second = await secondRef.json();
+
+    expect(second.id).toBe(first.id);
+    expect(second.existing).toBe(true);
+    await expect(prisma.project.count()).resolves.toBe(1);
+
+    const byIdRef = await api.fetch(new Request(`http://localhost/projects/${first.id}`));
+    expect(byIdRef.status).toBe(200);
+    await expect(byIdRef.json()).resolves.toMatchObject({ id: first.id });
+  });
+});
+
+describe("Jira import API", () => {
+  let prisma: PrismaClient;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    const isolated = await createIsolatedPrisma("vimbus-jira-import-api-");
+    prisma = isolated.prisma;
+    tempDir = isolated.tempDir;
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await prisma.$disconnect();
+    removeTempDir(tempDir);
+  });
+
+  test("imports direct issues without calling Jira", async () => {
+    const api = createApp({ prisma });
+    const project = await prisma.project.create({
+      data: { name: "Jira Import", rootPath: tempDir, baseBranch: "main" },
+    });
+
+    const response = await postJson(api, "/jira/import", {
+      projectId: project.id,
+      epicKey: "HC-100",
+      issues: jiraIssues(),
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      plannerRunId: expect.any(String),
+      reviewArtifactId: expect.any(String),
+      summary: {
+        issueCount: 3,
+        taskCount: 1,
+        validationCount: 1,
+      },
+    });
+    await expect(prisma.epic.findUnique({ where: { jiraIssueKey: "HC-100" } })).resolves.toMatchObject({
+      key: "HC-100",
+      title: "Import Jira epic",
+    });
+    await expect(prisma.task.findUnique({ where: { jiraIssueKey: "HC-101" } })).resolves.toMatchObject({
+      stableId: "HC-101",
+      title: "Build the API route",
+    });
+    await expect(prisma.reviewArtifact.findUnique({ where: { id: body.reviewArtifactId } })).resolves.toMatchObject({
+      subjectType: "planner_run",
+      subjectId: body.plannerRunId,
+      stage: "jira_import",
+      status: "pending",
+      title: "Jira import summary: HC-100",
+      markdown: expect.stringContaining("- Validations: 1"),
+      payloadJson: expect.stringContaining('"epicIssueKey":"HC-100"'),
+    });
+  });
+
+  test("approving a Jira import review approves the planner run without making tasks ready", async () => {
+    const api = createApp({ prisma });
+    const project = await prisma.project.create({
+      data: { name: "Jira Import Approval", rootPath: tempDir, baseBranch: "main" },
+    });
+    const importRef = await postJson(api, "/jira/import", {
+      projectId: project.id,
+      epicKey: "HC-100",
+      issues: jiraIssues(),
+    });
+    const imported = await importRef.json();
+
+    const approveRef = await postJson(api, `/review-artifacts/${imported.reviewArtifactId}/approve`, {
+      operator: "ak",
+    });
+
+    expect(approveRef.status).toBe(200);
+    const approval = await approveRef.json();
+    expect(approval.artifact).toMatchObject({
+      id: imported.reviewArtifactId,
+      status: "approved",
+      subjectType: "planner_run",
+      subjectId: imported.plannerRunId,
+    });
+    expect(approval.approval).toMatchObject({
+      subjectType: "planner_run",
+      subjectId: imported.plannerRunId,
+      stage: "jira_import",
+      status: "granted",
+    });
+
+    await expect(prisma.plannerRun.findUnique({ where: { id: imported.plannerRunId } })).resolves.toMatchObject({
+      status: "approved",
+    });
+    await expect(prisma.task.findUnique({ where: { jiraIssueKey: "HC-101" } })).resolves.toMatchObject({
+      status: "awaiting_verification_approval",
+    });
+    await expect(prisma.validation.findUnique({ where: { id: imported.validationIds[0] } })).resolves.toMatchObject({
+      status: "proposed",
+    });
+
+    const validationApproveRef = await postJson(api, `/validations/${imported.validationIds[0]}/approve`, {
+      operator: "ak",
+    });
+    expect(validationApproveRef.status).toBe(200);
+    await expect(prisma.task.findUnique({ where: { jiraIssueKey: "HC-101" } })).resolves.toMatchObject({
+      status: "ready",
+    });
+  });
+
+  test("fetches issues by JQL when direct issues are absent", async () => {
+    const requests: string[] = [];
+    const mockFetch = async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return Response.json({ issues: jiraIssues() });
+    };
+    vi.stubGlobal("fetch", mockFetch);
+
+    const api = createApp({
+      prisma,
+      env: {
+        TASKGOBLIN_JIRA_CLOUD_ID: "cloud-123",
+      },
+    });
+    const project = await prisma.project.create({
+      data: { name: "Jira Import", rootPath: tempDir, baseBranch: "main" },
+    });
+
+    const response = await postJson(api, "/jira/import", {
+      projectId: project.id,
+      jql: "project = HC ORDER BY created ASC",
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.summary).toEqual({
+      issueCount: 3,
+      taskCount: 1,
+      validationCount: 1,
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toContain("https://api.atlassian.com/ex/jira/cloud-123/rest/api/3/search/jql");
+    expect(requests[0]).toContain("jql=project+%3D+HC+ORDER+BY+created+ASC");
+  });
+
+  test("resolves Jira local env files with .env.local before .env", async () => {
+    const previousCwd = process.cwd();
+    const requests: string[] = [];
+    const mockFetch = async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return Response.json({ issues: jiraIssues() });
+    };
+    vi.stubGlobal("fetch", mockFetch);
+    writeFileSync(join(tempDir, ".env"), "TASKGOBLIN_JIRA_CLOUD_ID=cloud-from-env\n");
+    writeFileSync(join(tempDir, ".env.local"), "TASKGOBLIN_JIRA_CLOUD_ID=cloud-from-local\n");
+    process.chdir(tempDir);
+
+    try {
+      const api = createApp({ prisma });
+      const project = await prisma.project.create({
+        data: { name: "Jira Local Env Import", rootPath: tempDir, baseBranch: "main" },
+      });
+
+      const response = await postJson(api, "/jira/import", {
+        projectId: project.id,
+        jql: "project = HC",
+      });
+
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toContain("https://api.atlassian.com/ex/jira/cloud-from-local/rest/api/3/search/jql");
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
+  test("fetches an epic with children when direct issues and JQL are absent", async () => {
+    const requests: string[] = [];
+    const mockFetch = async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const jql = url.searchParams.get("jql") ?? "";
+      requests.push(jql);
+
+      if (jql === 'key = "HC-100"') {
+        return Response.json({ issues: [jiraIssues()[0]] });
+      }
+      if (jql === 'parent = "HC-100" ORDER BY created ASC') {
+        return Response.json({ issues: [jiraIssues()[1]] });
+      }
+      if (jql === 'parent in ("HC-101") ORDER BY created ASC') {
+        return Response.json({ issues: [jiraIssues()[2]] });
+      }
+
+      return Response.json({ issues: [] });
+    };
+    vi.stubGlobal("fetch", mockFetch);
+
+    const api = createApp({
+      prisma,
+      env: {
+        TASKGOBLIN_JIRA_SITE_URL: "https://jira.example.test",
+      },
+    });
+    const project = await prisma.project.create({
+      data: { name: "Jira Epic Import", rootPath: tempDir, baseBranch: "main" },
+    });
+
+    const response = await postJson(api, "/jira/import", {
+      projectId: project.id,
+      epicKey: "HC-100",
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.summary).toEqual({
+      issueCount: 3,
+      taskCount: 1,
+      validationCount: 1,
+    });
+    expect(requests).toEqual([
+      'key = "HC-100"',
+      'parent = "HC-100" ORDER BY created ASC',
+      'parent in ("HC-101") ORDER BY created ASC',
+    ]);
+  });
+});
+
+describe("validation API", () => {
+  let prisma: PrismaClient;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    const isolated = await createIsolatedPrisma("vimbus-validation-api-");
+    prisma = isolated.prisma;
+    tempDir = isolated.tempDir;
+  });
+
+  afterEach(async () => {
+    await prisma.$disconnect();
+    removeTempDir(tempDir);
+  });
+
+  test("creates, lists, updates, approves, and rejects task validations", async () => {
+    const api = createApp({ prisma });
+    const { task } = await seedApiTask(prisma, tempDir, {
+      taskStatus: "awaiting_verification_approval",
+    });
+
+    const emptyListRef = await api.fetch(new Request(`http://localhost/tasks/${task.id}/validations`));
+    expect(emptyListRef.status).toBe(200);
+    await expect(emptyListRef.json()).resolves.toEqual([]);
+
+    const createRef = await postJson(api, `/tasks/${task.id}/validations`, {
+      description: "Dashboard renders the primary task list.",
+      acceptanceCriteria: [{ label: "task list visible" }],
+      testType: "playwright",
+      rationale: "Browser coverage for the primary workflow.",
+      orderIndex: 0,
+    });
+    expect(createRef.status).toBe(201);
+    const validation = await createRef.json();
+    expect(validation).toMatchObject({
+      taskId: task.id,
+      title: "Dashboard renders the primary task list.",
+      status: "proposed",
+      testType: "playwright",
+      acceptanceCriteriaJson: JSON.stringify([{ label: "task list visible" }]),
+    });
+
+    const listRef = await api.fetch(new Request(`http://localhost/tasks/${task.id}/validations`));
+    expect(listRef.status).toBe(200);
+    const validations = await listRef.json();
+    expect(validations.map((item: { id: string }) => item.id)).toEqual([validation.id]);
+
+    const patchRef = await api.fetch(
+      new Request(`http://localhost/validations/${validation.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          description: "Dashboard renders filtered tasks.",
+          acceptanceCriteria: [{ label: "filtered task visible" }],
+          testType: "manual",
+        }),
+      }),
+    );
+    expect(patchRef.status).toBe(200);
+    const patched = await patchRef.json();
+    expect(patched).toMatchObject({
+      id: validation.id,
+      description: "Dashboard renders filtered tasks.",
+      testType: "manual",
+      acceptanceCriteriaJson: JSON.stringify([{ label: "filtered task visible" }]),
+    });
+
+    const approveRef = await postJson(api, `/validations/${validation.id}/approve`, {
+      operator: "ak",
+      reason: "Ready to run.",
+    });
+    expect(approveRef.status).toBe(200);
+    const approval = await approveRef.json();
+    expect(approval.validation.status).toBe("approved");
+    expect(approval.approval).toMatchObject({
+      subjectType: "validation",
+      subjectId: validation.id,
+      status: "granted",
+    });
+
+    const rejectRef = await postJson(api, `/tasks/${task.id}/validations`, {
+      title: "Ambiguous manual check",
+      description: "Needs a concrete assertion.",
+      testType: "manual",
+    });
+    const rejectedValidation = await rejectRef.json();
+    const rejectDecisionRef = await postJson(api, `/validations/${rejectedValidation.id}/reject`, {
+      operator: "ak",
+    });
+    expect(rejectDecisionRef.status).toBe(200);
+    const rejection = await rejectDecisionRef.json();
+    expect(rejection.validation.status).toBe("rejected");
+    expect(rejection.approval.status).toBe("rejected");
+  });
+
+  test("generates a Playwright spec review artifact with a safe code payload", async () => {
+    const projectRoot = join(tempDir, "project");
+    const stagingRoot = join(tempDir, "api-workspace");
+    mkdirSync(projectRoot, { recursive: true });
+    mkdirSync(stagingRoot, { recursive: true });
+    const { project, task } = await seedApiTask(prisma, projectRoot, {
+      taskStatus: "awaiting_verification_approval",
+    });
+    const api = createApp({
+      prisma,
+      playwrightWorkspaceRoot: stagingRoot,
+      playwrightGeneratorDeps: {
+        loadSystemPrompt: () => "Generate only TypeScript Playwright code.",
+        generateText: async ({ prompt }) => {
+          expect(prompt).toContain("Preferred route:\n/checkout");
+          return [
+            "```ts",
+            "import { expect, test } from '@playwright/test';",
+            "",
+            "test('checkout is visible', async ({ page }) => {",
+            "  await page.goto('/checkout');",
+            "  await expect(page.getByText('<script>alert(1)</script>')).toBeVisible();",
+            "});",
+            "```",
+          ].join("\n");
+        },
+      },
+    });
+
+    const createRef = await postJson(api, `/tasks/${task.id}/validations`, {
+      title: "Checkout route renders safely",
+      description: "The checkout page should render without leaking unsafe markup.",
+      acceptanceCriteria: [{ label: "checkout route is visible" }],
+      testType: "playwright",
+      orderIndex: 0,
+    });
+    expect(createRef.status).toBe(201);
+    const validation = await createRef.json();
+
+    const generateRef = await postJson(api, `/validations/${validation.id}/generate-spec`, {
+      route: "/checkout",
+    });
+    expect(generateRef.status).toBe(201);
+    const generated = await generateRef.json();
+    expect(generated.stagingFilePath).toBe(
+      `apps/api/.artifacts/staging/playwright/${task.id}/${validation.id}.spec.ts`,
+    );
+    expect(existsSync(join(projectRoot, "tests"))).toBe(false);
+
+    const artifact = await prisma.reviewArtifact.findUniqueOrThrow({
+      where: { id: generated.artifactId },
+    });
+    const payload = JSON.parse(artifact.payloadJson ?? "{}") as {
+      kind: string;
+      code: string;
+      stagingFilePath: string;
+      stagingWorkspaceRoot: string;
+      targetTestFilePath: string;
+    };
+    expect(artifact).toMatchObject({
+      projectId: project.id,
+      subjectType: "validation",
+      subjectId: validation.id,
+      stage: "validation_review",
+      status: "pending",
+    });
+    expect(payload).toMatchObject({
+      kind: "playwright_spec",
+      stagingFilePath: generated.stagingFilePath,
+      stagingWorkspaceRoot: stagingRoot,
+      targetTestFilePath: `tests/generated/${task.id}/${validation.id}.spec.ts`,
+    });
+    expect(payload.code).toContain("page.goto('/checkout')");
+    expect(readFileSync(join(stagingRoot, generated.stagingFilePath), "utf8")).toBe(payload.code);
+
+    const pageRef = await api.fetch(new Request(`http://localhost/review/${artifact.id}`));
+    expect(pageRef.status).toBe(200);
+    const html = await pageRef.text();
+    expect(html).toContain("<h2>Generated spec</h2>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).not.toContain("<script>alert(1)</script>");
+
+    const approveRef = await postJson(api, `/review-artifacts/${artifact.id}/approve`, {
+      operator: "ak",
+    });
+    expect(approveRef.status).toBe(200);
+    const decision = await approveRef.json();
+    expect(decision.approval).toMatchObject({
+      subjectType: "validation",
+      subjectId: validation.id,
+      status: "granted",
+    });
+    expect(existsSync(join(stagingRoot, generated.stagingFilePath))).toBe(false);
+    expect(readFileSync(join(projectRoot, payload.targetTestFilePath), "utf8")).toBe(payload.code);
+
+    const approvedValidation = await prisma.validation.findUniqueOrThrow({
+      where: { id: validation.id },
+    });
+    expect(approvedValidation).toMatchObject({
+      status: "approved",
+      testFilePath: payload.targetTestFilePath,
+    });
+  });
+
+  test("translates validation gate failures from execution into a 412 payload", async () => {
+    const api = createApp({
+      prisma,
+      env: {
+        VIMBUS_TEST_KEY: "present",
+      },
+    });
+    const { project, task } = await seedApiTask(prisma, tempDir, {
+      taskStatus: "ready",
+      verificationPlanStatus: "proposed",
+    });
+    await prisma.mcpServer.create({
+      data: {
+        projectId: project.id,
+        name: "taskgoblin-db",
+        transport: "stdio",
+        trustLevel: "trusted",
+        status: "active",
+      },
+    });
+
+    const executeRef = await postJson(api, `/tasks/${task.id}/execute`, {});
+    expect(executeRef.status).toBe(412);
+    await expect(executeRef.json()).resolves.toMatchObject({
+      error: "validation_gate",
+      code: "VALIDATION_GATE_FAILED",
+      taskId: task.id,
+      missingValidations: [],
+      hint: "No validations defined - run /plan:generate or /validation:create.",
+    });
   });
 });
 
@@ -209,11 +737,119 @@ describe("planner/task/approval API", () => {
     expect(generatedPlannerRun.status).toBe("generated");
     expect(generatedPlannerRun.proposalSummary.taskCount).toBe(1);
     expect(generatedPlannerRun.epics[0].tasks[0].status).toBe("planned");
+    expect(generatedPlannerRun.reviewArtifact).toMatchObject({
+      subjectType: "planner_run",
+      subjectId: plannerRun.id,
+      status: "pending",
+      stage: "planner_review",
+    });
 
     const eventsRef = await api.fetch(new Request(`http://localhost/events?projectId=${project.id}`));
     const events = await eventsRef.json();
     expect(events.map((event: { type: string }) => event.type)).toContain("planner.answer");
     expect(events.map((event: { type: string }) => event.type)).toContain("planner.proposed");
+    expect(events.map((event: { type: string }) => event.type)).toContain("review.requested");
+  });
+
+  test("creates markdown review artifacts and renders a safe browser page", async () => {
+    const api = createApp({ prisma });
+    const projectRef = await postJson(api, "/projects", {
+      name: "Review Project",
+      rootPath: tempDir,
+    });
+    const project = await projectRef.json();
+
+    const createRef = await postJson(api, "/review-artifacts", {
+      projectId: project.id,
+      subjectType: "agent_plan",
+      subjectId: "plan_1",
+      title: "Approve generated plan",
+      markdown: "# Generated Plan\n\n<script>alert(1)</script>\n\n- Run `bun test`",
+    });
+    expect(createRef.status).toBe(201);
+    const artifact = await createRef.json();
+    expect(artifact.status).toBe("pending");
+    expect(artifact.stage).toBe("review");
+
+    const listRef = await api.fetch(
+      new Request(`http://localhost/review-artifacts?projectId=${project.id}&status=pending`),
+    );
+    const artifacts = await listRef.json();
+    expect(artifacts.map((item: { id: string }) => item.id)).toContain(artifact.id);
+
+    const pageRef = await api.fetch(
+      new Request(`http://localhost/review/${artifact.id}`, {
+        headers: { accept: "text/html" },
+      }),
+    );
+    expect(pageRef.status).toBe(200);
+    const html = await pageRef.text();
+    expect(html).toContain("<h1>Approve generated plan</h1>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain(`/review-artifacts/${artifact.id}/approve`);
+
+    const approveRef = await postJson(api, `/review-artifacts/${artifact.id}/approve`, {
+      operator: "ak",
+    });
+    expect(approveRef.status).toBe(200);
+    const decision = await approveRef.json();
+    expect(decision.artifact.status).toBe("approved");
+    expect(decision.approval).toMatchObject({
+      subjectType: "review_artifact",
+      subjectId: artifact.id,
+      status: "granted",
+      operator: "ak",
+    });
+  });
+
+  test("browser review approval for validation artifacts updates validation readiness", async () => {
+    const api = createApp({ prisma });
+    const { project, task } = await seedApiTask(prisma, tempDir, {
+      taskStatus: "awaiting_verification_approval",
+    });
+    const validationRef = await postJson(api, `/tasks/${task.id}/validations`, {
+      title: "Approve browser-reviewed validation",
+      description: "Validation review artifact drives readiness.",
+      acceptanceCriteria: [{ label: "browser approval marks task ready" }],
+      testType: "manual",
+    });
+    const validation = await validationRef.json();
+    const artifactRef = await postJson(api, "/review-artifacts", {
+      projectId: project.id,
+      subjectType: "validation",
+      subjectId: validation.id,
+      title: "Review validation contract",
+      markdown: "# Review validation contract\n\n- [ ] browser approval marks task ready",
+      stage: "validation_review",
+    });
+    const artifact = await artifactRef.json();
+
+    const pageRef = await api.fetch(new Request(`http://localhost/review/${artifact.id}`));
+    expect(pageRef.status).toBe(200);
+    const html = await pageRef.text();
+    expect(html).toContain("Review validation contract");
+    expect(html).toContain(`/review-artifacts/${artifact.id}/approve`);
+
+    const approveRef = await postJson(api, `/review-artifacts/${artifact.id}/approve`, {
+      operator: "ak",
+    });
+    expect(approveRef.status).toBe(200);
+    const decision = await approveRef.json();
+    expect(decision.approval).toMatchObject({
+      subjectType: "validation",
+      subjectId: validation.id,
+      status: "granted",
+    });
+
+    const approvedValidationRef = await api.fetch(new Request(`http://localhost/validations/${validation.id}`));
+    const approvedValidation = await approvedValidationRef.json();
+    expect(approvedValidation.status).toBe("approved");
+    expect(approvedValidation.approvalId).toBe(decision.approval.id);
+
+    const taskRef = await api.fetch(new Request(`http://localhost/tasks/${task.id}`));
+    const readyTask = await taskRef.json();
+    expect(readyTask.status).toBe("ready");
   });
 
   test("generates planner proposals through the planner service path", async () => {
@@ -329,6 +965,7 @@ describe("planner/task/approval API", () => {
     expect(generatedPlannerRun.epics[0].key).toContain("PLAN-");
     expect(generatedPlannerRun.epics[0].tasks[0].stableId).toContain("PLAN-");
     expect(generatedPlannerRun.epics[0].tasks[0].status).toBe("planned");
+    expect(generatedPlannerRun.reviewArtifact.title).toContain("Plan review");
 
     const tasksRef = await api.fetch(new Request(`http://localhost/tasks?projectId=${project.id}`));
     const tasks = await tasksRef.json();
@@ -341,6 +978,44 @@ describe("planner/task/approval API", () => {
     expect(events.map((event) => event.type)).toContain("model.resolution.requested");
     expect(events.map((event) => event.type)).toContain("model.resolution.succeeded");
     expect(events.map((event) => event.type)).toContain("planner.proposed");
+    expect(events.map((event) => event.type)).toContain("review.requested");
+  });
+
+  test("browser planner review approval advances generated tasks", async () => {
+    const api = createApp({ prisma });
+    const { project, plannerRun } = await seedGeneratedPlannerRun(api, tempDir);
+    const artifactsRef = await api.fetch(
+      new Request(`http://localhost/review-artifacts?subjectType=planner_run&subjectId=${plannerRun.id}`),
+    );
+    const artifacts = await artifactsRef.json();
+    const artifact = artifacts[0];
+    expect(artifact.status).toBe("pending");
+
+    const pageRef = await api.fetch(new Request(`http://localhost/review/${artifact.id}`));
+    expect(pageRef.status).toBe(200);
+    expect(await pageRef.text()).toContain("Plan review: Implement foundation");
+
+    const approveRef = await api.fetch(
+      new Request(`http://localhost/review-artifacts/${artifact.id}/approve`, {
+        method: "POST",
+        headers: { accept: "text/html" },
+      }),
+    );
+    expect(approveRef.status).toBe(302);
+    expect(approveRef.headers.get("location")).toBe(`/review/${artifact.id}`);
+
+    const tasksAfterPlannerApprovalRef = await api.fetch(new Request(`http://localhost/tasks?projectId=${project.id}`));
+    const tasksAfterPlannerApproval = await tasksAfterPlannerApprovalRef.json();
+    expect(tasksAfterPlannerApproval[0].status).toBe("awaiting_verification_approval");
+
+    const approvalsRef = await api.fetch(
+      new Request(
+        `http://localhost/approvals?subjectType=planner_run&subjectId=${plannerRun.id}&projectId=${project.id}`,
+      ),
+    );
+    const approvals = await approvalsRef.json();
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0].status).toBe("granted");
   });
 
   test("planner approval and verification approval advance task state in order", async () => {
@@ -1386,6 +2061,69 @@ async function seedBenchmarkExecutionTelemetry(prisma: PrismaClient, rootPath: s
   return { project, execution };
 }
 
+async function seedApiTask(
+  prisma: PrismaClient,
+  rootPath: string,
+  options: {
+    taskStatus?: string;
+    verificationPlanStatus?: string;
+  } = {},
+) {
+  const project = await prisma.project.create({
+    data: {
+      name: "Validation API Project",
+      rootPath,
+      baseBranch: "main",
+    },
+  });
+  const plannerRun = await prisma.plannerRun.create({
+    data: {
+      projectId: project.id,
+      goal: "Validate API routes",
+      status: "generated",
+    },
+  });
+  const epic = await prisma.epic.create({
+    data: {
+      projectId: project.id,
+      plannerRunId: plannerRun.id,
+      key: `VALAPI-${Math.random().toString(36).slice(2)}`,
+      title: "Validation API",
+      goal: "Expose task validations.",
+      status: "planned",
+      orderIndex: 0,
+      acceptanceJson: "[]",
+    },
+  });
+  const task = await prisma.task.create({
+    data: {
+      epicId: epic.id,
+      stableId: `VALAPI-TASK-${Math.random().toString(36).slice(2)}`,
+      title: "Expose validations",
+      type: "backend",
+      complexity: "medium",
+      status: options.taskStatus ?? "ready",
+      orderIndex: 0,
+      acceptanceJson: JSON.stringify([{ label: "validations are visible" }]),
+    },
+  });
+  const verificationPlan = await prisma.verificationPlan.create({
+    data: {
+      taskId: task.id,
+      status: options.verificationPlanStatus ?? "approved",
+      approvedAt: options.verificationPlanStatus === "proposed" ? null : new Date(),
+    },
+  });
+
+  return {
+    project,
+    plannerRun,
+    epic,
+    task,
+    verificationPlan,
+  };
+}
+
 type SeedExecutionVerificationItem = {
   kind: string;
   runner?: string | null;
@@ -1622,4 +2360,45 @@ function postJson(api: ReturnType<typeof createApp>, path: string, body: unknown
       body: JSON.stringify(body),
     }),
   );
+}
+
+function jiraIssues() {
+  return [
+    {
+      id: "100",
+      key: "HC-100",
+      self: "https://jira.example.test/browse/HC-100",
+      fields: {
+        summary: "Import Jira epic",
+        description: "Bring Jira issues into TaskGoblin.",
+        issuetype: { name: "Epic" },
+        status: { name: "To Do" },
+      },
+    },
+    {
+      id: "101",
+      key: "HC-101",
+      self: "https://jira.example.test/browse/HC-101",
+      fields: {
+        summary: "Build the API route",
+        description: "Wire the import service.",
+        issuetype: { name: "Task" },
+        parent: { key: "HC-100" },
+        status: { name: "To Do" },
+      },
+    },
+    {
+      id: "102",
+      key: "HC-102",
+      self: "https://jira.example.test/browse/HC-102",
+      fields: {
+        summary: "Manual import smoke check",
+        description: "Confirm imported tasks are reviewable.",
+        issuetype: { name: "Sub-task", subtask: true },
+        parent: { key: "HC-101" },
+        labels: ["test-type:manual"],
+        status: { name: "To Do" },
+      },
+    },
+  ];
 }

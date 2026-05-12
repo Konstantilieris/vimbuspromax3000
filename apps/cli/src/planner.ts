@@ -73,6 +73,12 @@ type ApiApproval = {
   reason?: string | null;
 };
 
+type ApiReviewArtifact = {
+  id: string;
+  status: string;
+  title: string;
+};
+
 type ApiPlannerRun = {
   id: string;
   projectId: string;
@@ -88,6 +94,7 @@ type ApiPlannerRun = {
     verificationPlanCount: number;
   };
   approvals?: ApiApproval[];
+  reviewArtifact?: ApiReviewArtifact;
   epics?: Array<{
     key: string;
     title: string;
@@ -148,7 +155,7 @@ export function getProjectsViewSnapshot(projects: ApiProject[]): string {
   return lines.join("\n");
 }
 
-export function getPlannerRunViewSnapshot(plannerRun: ApiPlannerRun): string {
+export function getPlannerRunViewSnapshot(plannerRun: ApiPlannerRun, options: { apiUrl?: string } = {}): string {
   const interviewKeys = Object.keys(plannerRun.interview ?? {});
   const lines = [
     `${PRODUCT_NAME} planner`,
@@ -164,6 +171,11 @@ export function getPlannerRunViewSnapshot(plannerRun: ApiPlannerRun): string {
     lines.push(
       `Proposal: epics=${plannerRun.proposalSummary.epicCount} tasks=${plannerRun.proposalSummary.taskCount} verification=${plannerRun.proposalSummary.verificationPlanCount}`,
     );
+  }
+
+  if (plannerRun.reviewArtifact) {
+    const reviewUrl = `${withoutTrailingSlash(options.apiUrl ?? "http://localhost:3000")}/review/${encodeURIComponent(plannerRun.reviewArtifact.id)}`;
+    lines.push(`Review: ${plannerRun.reviewArtifact.status} ${reviewUrl}`);
   }
 
   const epics = plannerRun.epics ?? [];
@@ -254,7 +266,7 @@ async function runShowPlannerRun(apiUrl: string, options: ParsedOptions, request
     `${apiUrl}/planner/runs/${encodeURIComponent(requireOption(options, "planner-run-id"))}`,
   );
 
-  return getPlannerRunViewSnapshot(plannerRun);
+  return getPlannerRunViewSnapshot(plannerRun, { apiUrl });
 }
 
 async function runAnswerPlannerRun(apiUrl: string, options: ParsedOptions, request: typeof fetch) {
@@ -268,7 +280,7 @@ async function runAnswerPlannerRun(apiUrl: string, options: ParsedOptions, reque
     },
   );
 
-  return getPlannerRunViewSnapshot(plannerRun);
+  return getPlannerRunViewSnapshot(plannerRun, { apiUrl });
 }
 
 /**
@@ -402,7 +414,7 @@ async function runGeneratePlannerRun(apiUrl: string, options: ParsedOptions, req
     },
   );
 
-  return getPlannerRunViewSnapshot(plannerRun);
+  return getPlannerRunViewSnapshot(plannerRun, { apiUrl });
 }
 
 async function runApprovePlannerRun(apiUrl: string, options: ParsedOptions, request: typeof fetch) {

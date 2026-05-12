@@ -38,7 +38,7 @@ export async function createApprovalDecision(db: DatabaseClient, input: CreateAp
     }
 
     if (input.subjectType === "verification_plan") {
-      await applyVerificationPlanApproval(tx, input);
+      await applyVerificationPlanApproval(tx, input, approval.id);
     }
 
     await appendLoopEvent(tx, {
@@ -86,7 +86,11 @@ async function applyPlannerRunApproval(db: DatabaseClient, input: CreateApproval
   }
 }
 
-async function applyVerificationPlanApproval(db: DatabaseClient, input: CreateApprovalDecisionInput) {
+async function applyVerificationPlanApproval(
+  db: DatabaseClient,
+  input: CreateApprovalDecisionInput,
+  approvalId: string,
+) {
   const plan = await db.verificationPlan.findUnique({
     where: { id: input.subjectId },
     include: {
@@ -102,15 +106,23 @@ async function applyVerificationPlanApproval(db: DatabaseClient, input: CreateAp
     throw new Error(`Verification plan ${input.subjectId} was not found.`);
   }
 
+  const now = new Date();
+
   await db.verificationPlan.update({
     where: { id: plan.id },
     data: {
       status: input.status === "granted" ? "approved" : "rejected",
-      approvedAt: input.status === "granted" ? new Date() : null,
+      approvedAt: input.status === "granted" ? now : null,
     },
   });
 
   if (input.status === "granted") {
+    const verificationItems = await db.verificationItem.findMany({
+      where: { planId: plan.id },
+      select: { id: true },
+    });
+    const verificationItemIds = verificationItems.map((item) => item.id);
+
     await db.verificationItem.updateMany({
       where: {
         planId: plan.id,
@@ -121,11 +133,76 @@ async function applyVerificationPlanApproval(db: DatabaseClient, input: CreateAp
       },
     });
 
-    await db.task.update({
-      where: { id: plan.taskId },
-      data: {
-        status: "ready",
-      },
-    });
+    if (verificationItemIds.length > 0) {
+      await db.validation.updateMany({
+        where: {
+          taskId: plan.taskId,
+          status: "proposed",
+          OR: [
+            { verificationItemId: { in: verificationItemIds } },
+            { legacyVerificationItemId: { in: verificationItemIds } },
+          ],
+        },
+        data: {
+          status: "approved",
+          approvalId,
+          approvedAt: now,
+          rejectedAt: null,
+        },
+      });
+    }
+
+    await refreshTaskReadiness(db, plan.taskId);
   }
+}
+
+export async function refreshTaskReadiness(db: DatabaseClient, taskId: string) {
+  const data = await buildReadyTaskStatusUpdate(db, taskId);
+
+  if (!data.status) {
+    return null;
+  }
+
+  return db.task.update({
+    where: { id: taskId },
+    data,
+  });
+}
+
+async function buildReadyTaskStatusUpdate(db: DatabaseClient, taskId: string): Promise<{ status?: string }> {
+  const task = await db.task.findUnique({
+    where: { id: taskId },
+    select: { status: true },
+  });
+
+  if (!task) {
+    return {};
+  }
+
+  const validations = await db.validation.findMany({
+    where: { taskId },
+    select: { status: true },
+  });
+
+  if (validations.length > 0) {
+    if (validations.every((validation) => validation.status === "approved")) {
+      return { status: "ready" };
+    }
+
+    return task.status === "ready" ? { status: "awaiting_verification_approval" } : {};
+  }
+
+  const approvedPlan = await db.verificationPlan.findFirst({
+    where: {
+      taskId,
+      status: "approved",
+    },
+    select: { id: true },
+  });
+
+  if (approvedPlan) {
+    return { status: "ready" };
+  }
+
+  return task.status === "ready" ? { status: "awaiting_verification_approval" } : {};
 }

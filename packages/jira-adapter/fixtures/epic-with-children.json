@@ -1,0 +1,205 @@
+{
+  "issues": [
+    {
+      "id": "10000",
+      "key": "HC-100",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10000",
+      "fields": {
+        "summary": "E6 Jira adapter foundation",
+        "description": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Import Jira issue trees into draft planning records."
+                }
+              ]
+            }
+          ]
+        },
+        "issuetype": {
+          "id": "10000",
+          "name": "Epic",
+          "subtask": false
+        },
+        "status": {
+          "name": "To Do"
+        },
+        "customfield_12345": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            {
+              "type": "bulletList",
+              "content": [
+                {
+                  "type": "listItem",
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Epic drafts are produced"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "listItem",
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Child issue hierarchy is preserved"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "10001",
+      "key": "HC-101",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10001",
+      "fields": {
+        "summary": "Map Jira Story issues",
+        "description": "Story issues become internal task drafts.",
+        "issuetype": {
+          "id": "10001",
+          "name": "Story",
+          "subtask": false
+        },
+        "parent": {
+          "key": "HC-100"
+        },
+        "status": {
+          "name": "In Progress"
+        },
+        "labels": [
+          "import"
+        ],
+        "customfield_12345": "- Story acceptance is captured\n- Story description is preserved"
+      }
+    },
+    {
+      "id": "10002",
+      "key": "HC-102",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10002",
+      "fields": {
+        "summary": "Map Jira Task issues",
+        "description": "Task issues also become internal task drafts.",
+        "issuetype": {
+          "id": "10002",
+          "name": "Task",
+          "subtask": false
+        },
+        "parent": {
+          "key": "HC-100"
+        },
+        "status": {
+          "name": "To Do"
+        },
+        "labels": [
+          "adapter"
+        ],
+        "customfield_12345": [
+          {
+            "label": "Task acceptance is captured"
+          },
+          {
+            "label": "Task order remains stable"
+          }
+        ]
+      }
+    },
+    {
+      "id": "10003",
+      "key": "HC-103",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10003",
+      "fields": {
+        "summary": "Unit test mapping output",
+        "description": "Sub-task becomes a logic validation draft.",
+        "issuetype": {
+          "id": "10003",
+          "name": "Sub-task",
+          "subtask": true
+        },
+        "parent": {
+          "key": "HC-101"
+        },
+        "status": {
+          "name": "To Do"
+        },
+        "labels": [
+          "validation:logic"
+        ],
+        "customfield_12345": "Mapper fixture test passes"
+      }
+    },
+    {
+      "id": "10004",
+      "key": "HC-104",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10004",
+      "fields": {
+        "summary": "Manual review import shape",
+        "description": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Sub-task becomes a manual validation draft."
+                }
+              ]
+            }
+          ]
+        },
+        "issuetype": {
+          "id": "10004",
+          "name": "Sub-task",
+          "subtask": true
+        },
+        "parent": {
+          "key": "HC-102"
+        },
+        "status": {
+          "name": "To Do"
+        },
+        "labels": [
+          "validation:manual"
+        ],
+        "customfield_12345": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Manual reviewer can inspect the imported draft"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

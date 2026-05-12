@@ -15,6 +15,7 @@
       "@vimbuspromax3000/evaluator": ["packages/evaluator/src/index.ts"],
       "@vimbuspromax3000/db": ["packages/db/src/index.ts"],
       "@vimbuspromax3000/db/*": ["packages/db/src/*"],
+      "@vimbuspromax3000/jira-adapter": ["packages/jira-adapter/src/index.ts"],
       "@vimbuspromax3000/mcp-client": ["packages/mcp-client/src/index.ts"],
       "@vimbuspromax3000/model-registry": ["packages/model-registry/src/index.ts"],
       "@vimbuspromax3000/observability": ["packages/observability/src/index.ts"],

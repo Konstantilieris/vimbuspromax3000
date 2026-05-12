@@ -33,6 +33,10 @@ export default defineConfig({
         replacement: fileURLToPath(new URL("./packages/evaluator/src/index.ts", import.meta.url)),
       },
       {
+        find: "@vimbuspromax3000/jira-adapter",
+        replacement: fileURLToPath(new URL("./packages/jira-adapter/src/index.ts", import.meta.url)),
+      },
+      {
         find: "@vimbuspromax3000/mcp-client",
         replacement: fileURLToPath(new URL("./packages/mcp-client/src/index.ts", import.meta.url)),
       },

@@ -13,6 +13,7 @@ model Project {
   rootPath     String
   baseBranch   String   @default("main")
   branchNaming String   @default("tg/<module>/<task-id>-<slug>")
+  jiraMappingJson String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -21,6 +22,7 @@ model Project {
   assets      SourceOfTruthAsset[]
   approvals   Approval[]
   events      LoopEvent[]
+  reviewArtifacts ReviewArtifact[]
 
   modelProviders ModelProvider[]
   modelSlots     ProjectModelSlot[]
@@ -52,6 +54,7 @@ model Epic {
   projectId      String
   plannerRunId   String?
   key            String
+  jiraIssueKey   String?  @unique
   title          String
   goal           String
   status         String
@@ -73,6 +76,7 @@ model Task {
   id              String   @id @default(cuid())
   epicId          String
   stableId        String
+  jiraIssueKey    String?  @unique
   title           String
   description     String?
   type            String
@@ -87,6 +91,7 @@ model Task {
 
   epic              Epic                 @relation(fields: [epicId], references: [id])
   verificationPlans VerificationPlan[]
+  validations        Validation[]
   branch            TaskBranch?
   executions        TaskExecution[]
   assets            SourceOfTruthAsset[]
@@ -132,12 +137,53 @@ model VerificationItem {
 
   plan     VerificationPlan @relation(fields: [planId], references: [id])
   testRuns TestRun[]
+  validation Validation?
   expectedAsset SourceOfTruthAsset? @relation("ExpectedVerificationAsset", fields: [expectedAssetId], references: [id])
   assets SourceOfTruthAsset[] @relation("VerificationItemAssets")
   visualResults VisualVerificationResult[]
 
   @@index([planId, kind])
   @@index([taskId, status])
+}
+
+model Validation {
+  id                  String    @id @default(cuid())
+  taskId              String
+  verificationItemId  String?   @unique
+  testType            String
+  status              String    @default("proposed")
+  title               String
+  description         String?
+  acceptanceCriteriaJson String  @default("[]")
+  rationale           String?
+  command             String?
+  testFilePath        String?
+  metadataJson        String?
+  orderIndex          Int       @default(0)
+  approvalId          String?
+  legacyVerificationItemId String? @unique
+  lastTaskExecutionId String?
+  lastTestRunId       String?
+  lastExitCode        Int?
+  resultSummary       String?
+  resultJson          String?
+  artifactPath        String?
+  approvedAt          DateTime?
+  rejectedAt          DateTime?
+  startedAt           DateTime?
+  finishedAt          DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  task              Task             @relation(fields: [taskId], references: [id])
+  verificationItem  VerificationItem? @relation(fields: [verificationItemId], references: [id])
+  lastTaskExecution TaskExecution?    @relation(fields: [lastTaskExecutionId], references: [id])
+  lastTestRun       TestRun?          @relation(fields: [lastTestRunId], references: [id])
+
+  @@index([taskId, status])
+  @@index([taskId, testType])
+  @@index([lastTaskExecutionId])
+  @@index([lastTestRunId])
 }
 
 model SourceOfTruthAsset {
@@ -216,6 +262,26 @@ model Approval {
   @@index([projectId, subjectType, subjectId])
 }
 
+model ReviewArtifact {
+  id          String   @id @default(cuid())
+  projectId   String
+  subjectType String
+  subjectId   String
+  title       String
+  markdown    String
+  payloadJson String?
+  stage       String   @default("review")
+  status      String   @default("pending")
+  approvalId  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@index([projectId, status])
+  @@index([subjectType, subjectId])
+}
+
 model TaskBranch {
   id             String    @id @default(cuid())
   taskId         String    @unique
@@ -248,6 +314,7 @@ model TaskExecution {
   patchReviews PatchReview[]
   events       LoopEvent[]
   visualResults VisualVerificationResult[]
+  validationResults Validation[]
 
   @@index([taskId, status])
 }
@@ -288,6 +355,7 @@ model TestRun {
 
   taskExecution   TaskExecution     @relation(fields: [taskExecutionId], references: [id])
   verificationItem VerificationItem? @relation(fields: [verificationItemId], references: [id])
+  validationResults Validation[]
 
   @@index([taskExecutionId, iterationIndex, phase])
 }

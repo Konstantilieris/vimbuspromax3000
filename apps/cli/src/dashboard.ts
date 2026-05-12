@@ -1,8 +1,10 @@
 import { PRODUCT_NAME } from "@vimbuspromax3000/shared";
+import { DESIGN_COMMANDS } from "./design";
 import { EXECUTION_COMMANDS } from "./execution";
 import { MCP_COMMANDS } from "./mcp";
 import { MODEL_COMMANDS } from "./models";
 import { PLANNER_COMMANDS } from "./planner";
+import { REVIEW_COMMANDS } from "./review";
 import { SETUP_COMMANDS } from "./setup";
 
 export const DASHBOARD_COLUMNS = [
@@ -19,6 +21,8 @@ export function getDashboardLines(): string[] {
     `Models: ${MODEL_COMMANDS.join(" ")}`,
     `MCP: ${MCP_COMMANDS.join(" ")}`,
     `Planner: ${PLANNER_COMMANDS.join(" ")}`,
+    `Design: ${DESIGN_COMMANDS.join(" ")}`,
+    `Review: ${REVIEW_COMMANDS.join(" ")}`,
     `Execution: ${EXECUTION_COMMANDS.join(" ")}`,
     "No project loaded yet.",
     "Health: bootstrap placeholder",

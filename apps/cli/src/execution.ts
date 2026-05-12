@@ -85,6 +85,24 @@ type ApiApproval = {
   status: string;
 };
 
+type ApiValidationGateValidation = {
+  id?: string;
+  title?: string | null;
+  status?: string;
+  orderIndex?: number | null;
+};
+
+type ApiValidationGateFailure = {
+  code?: string;
+  error?: string;
+  message?: string;
+  taskId?: string;
+  reason?: string;
+  validations?: ApiValidationGateValidation[];
+  unapprovedValidations?: ApiValidationGateValidation[];
+  legacyVerificationPlanStatus?: string | null;
+};
+
 export function isExecutionCommand(value: string): boolean {
   return EXECUTION_COMMANDS.includes(value as (typeof EXECUTION_COMMANDS)[number]);
 }
@@ -219,7 +237,7 @@ export function getMcpCallsViewSnapshot(calls: ApiMcpCall[]): string {
 }
 
 async function runStartExecution(apiUrl: string, options: ParsedOptions, request: typeof fetch) {
-  const taskId = requireOption(options, "task-id");
+  const taskId = requireTaskIdOption(options);
   const execution = await requestJson<ApiExecution>(
     request,
     `${apiUrl}/tasks/${encodeURIComponent(taskId)}/execute`,
@@ -383,8 +401,12 @@ async function requestJson<T>(
   const payload = text ? (JSON.parse(text) as unknown) : undefined;
 
   if (!response.ok) {
+    if (response.status === 412 && isValidationGateFailure(payload)) {
+      throw new Error(formatValidationGateFailure(payload), { cause: payload });
+    }
+
     const message = isObject(payload) && typeof payload.error === "string" ? payload.error : response.statusText;
-    throw new Error(`API ${response.status}: ${message}`);
+    throw new Error(`API ${response.status}: ${message}`, { cause: payload });
   }
 
   return payload as T;
@@ -397,6 +419,8 @@ function parseOptions(args: readonly string[]): ParsedOptions {
     const token = args[index];
 
     if (!token?.startsWith("--")) {
+      const position = nextPositionIndex(parsed);
+      parsed[`_${position}`] = token;
       continue;
     }
 
@@ -417,20 +441,120 @@ function parseOptions(args: readonly string[]): ParsedOptions {
   return parsed;
 }
 
-function requireOption(options: ParsedOptions, name: string): string {
-  const value = options[name];
+function requireTaskIdOption(options: ParsedOptions): string {
+  const explicitTaskId = getOptionValue(options, "task-id");
+  const positionalTaskId = getOptionValue(options, "_0");
+  const taskId = explicitTaskId ?? positionalTaskId;
 
-  if (!value || value === "true") {
+  if (!taskId) {
+    throw new Error("Missing required option --task-id or positional <task-id>.");
+  }
+
+  return taskId;
+}
+
+function requireOption(options: ParsedOptions, name: string): string {
+  const value = getOptionValue(options, name);
+
+  if (!value) {
     throw new Error(`Missing required option --${name}.`);
   }
 
   return value;
 }
 
+function getOptionValue(options: ParsedOptions, name: string): string | null {
+  const value = options[name];
+  return value && value !== "true" ? value : null;
+}
+
+function nextPositionIndex(options: ParsedOptions) {
+  let index = 0;
+
+  while (options[`_${index}`] !== undefined) {
+    index += 1;
+  }
+
+  return index;
+}
+
 function withoutTrailingSlash(value: string): string {
   return value.replace(/\/$/, "");
 }
 
-function isObject(value: unknown): value is { error?: unknown } {
+function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isValidationGateFailure(value: unknown): value is ApiValidationGateFailure {
+  if (!isObject(value)) {
+    return false;
+  }
+
+  return (
+    value.code === "VALIDATION_GATE_FAILED" ||
+    Array.isArray((value as { unapprovedValidations?: unknown }).unapprovedValidations) ||
+    (typeof value.error === "string" && value.error.toLowerCase().includes("validation"))
+  );
+}
+
+function formatValidationGateFailure(payload: ApiValidationGateFailure): string {
+  const lines = ["Validation gate failed (API 412)."];
+  const taskId = normalizeString(payload.taskId);
+  const message = normalizeString(payload.message) ?? normalizeString(payload.error);
+  const reason = normalizeString(payload.reason);
+
+  if (taskId) {
+    lines.push(`Task: ${taskId}`);
+  }
+
+  if (reason) {
+    lines.push(`Reason: ${reason}`);
+  }
+
+  if (message) {
+    lines.push(`Message: ${message}`);
+  }
+
+  const unapprovedValidations = getValidationGateList(payload);
+  if (unapprovedValidations.length > 0) {
+    lines.push("Unapproved validations:");
+    for (const validation of unapprovedValidations) {
+      lines.push(`- ${formatValidationGateValidation(validation)}`);
+    }
+  } else if (payload.legacyVerificationPlanStatus !== undefined) {
+    lines.push(`Legacy verification plan status: ${payload.legacyVerificationPlanStatus ?? "none"}`);
+  }
+
+  return lines.join("\n");
+}
+
+function getValidationGateList(payload: ApiValidationGateFailure) {
+  if (Array.isArray(payload.unapprovedValidations) && payload.unapprovedValidations.length > 0) {
+    return payload.unapprovedValidations;
+  }
+
+  if (Array.isArray(payload.validations)) {
+    return payload.validations.filter((validation) => validation.status !== "approved");
+  }
+
+  return [];
+}
+
+function formatValidationGateValidation(validation: ApiValidationGateValidation) {
+  const parts = [
+    normalizeString(validation.status) ?? "unknown",
+    normalizeString(validation.title) ?? normalizeString(validation.id) ?? "untitled validation",
+  ];
+  const id = normalizeString(validation.id);
+
+  if (id && id !== parts[1]) {
+    parts.push(`(${id})`);
+  }
+
+  return parts.join(" ");
+}
+
+function normalizeString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
